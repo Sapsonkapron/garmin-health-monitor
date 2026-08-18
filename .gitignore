@@ -1,0 +1,14 @@
+.env
+.env.local
+logs/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+/tmp/garmin_data/
+.venv/
+*.pyo
+*.egg-info/
+"pass GitHub.py"
+"GitHubToken.py"
+macos/*.plist
