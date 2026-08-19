@@ -11,10 +11,16 @@ import logging
 import argparse
 import urllib.request
 import urllib.parse
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from pathlib import Path
 
 from garminconnect import Garmin
+
+try:
+    from zoneinfo import ZoneInfo
+    KYIV_TZ = ZoneInfo("Europe/Kyiv")
+except Exception:
+    KYIV_TZ = timezone(timedelta(hours=3))  # fallback: фіксований EEST
 
 # --- Конфігурація ---
 DATA_DIR = Path("/tmp/garmin_data")
@@ -98,8 +104,8 @@ def send_telegram(text: str) -> bool:
 
 
 def is_send_time(hour: int = 9, tolerance_min: int = 5) -> bool:
-    """Перевіряє, чи зараз час відправки (за замовчуванням 9:00 ± 5 хв)."""
-    now = datetime.now()
+    """Перевіряє, чи зараз час відправки за Києвом (за замовчуванням 9:00 ± 5 хв)."""
+    now = datetime.now(KYIV_TZ)
     scheduled = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     diff = abs((now - scheduled).total_seconds())
     return diff <= tolerance_min * 60
@@ -375,7 +381,7 @@ def check_daily_health(force_telegram: bool = False):
         logger.warning(f"Не вдалось зберегти дані: {e}")
 
     # --- Формування повідомлення ---
-    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+    now_str = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
     lines = [f"📅 {now_str}"]
     if alerts:
         lines.append("⚠️ Увага! Виявлено відхилення:")
