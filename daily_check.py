@@ -27,6 +27,9 @@ DATA_DIR = Path("/tmp/garmin_data")
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+ALERT_STATE_FILE = DATA_DIR / "alert_state.json"
+REALERT_DAYS = 3  # через скільки днів повторно надіслати повний алерт, якщо відхилення не зникло
+
 
 def get_garmin_credentials():
     """Отримує логін/пароль Garmin з env."""
@@ -109,6 +112,67 @@ def is_send_time(hour: int = 9, tolerance_min: int = 5) -> bool:
     scheduled = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     diff = abs((now - scheduled).total_seconds())
     return diff <= tolerance_min * 60
+
+
+def load_alert_state() -> dict:
+    """Завантажує стан попередніх алертів {метрика: дата останнього повного сповіщення}."""
+    if not ALERT_STATE_FILE.exists():
+        return {}
+    try:
+        with open(ALERT_STATE_FILE) as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Не вдалось прочитати alert_state.json: {e}")
+        return {}
+
+
+def save_alert_state(state: dict):
+    """Зберігає стан алертів на диск."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(ALERT_STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Не вдалось зберегти alert_state.json: {e}")
+
+
+def dedupe_alerts(alerts: list) -> tuple:
+    """
+    Розділяє алерти на нові/повторні через REALERT_DAYS та прибирає з стану вирішені.
+    Повертає (new_alerts, suppressed_alerts).
+    """
+    state = load_alert_state()
+    today_date = date.today()
+    current_keys = {a["metric"] for a in alerts}
+
+    new_alerts = []
+    suppressed_alerts = []
+
+    for alert in alerts:
+        key = alert["metric"]
+        last_date_str = state.get(key)
+        should_notify = True
+        if last_date_str:
+            try:
+                last_date = date.fromisoformat(last_date_str)
+                if (today_date - last_date).days < REALERT_DAYS:
+                    should_notify = False
+            except ValueError:
+                pass
+
+        if should_notify:
+            new_alerts.append(alert)
+            state[key] = today_date.isoformat()
+        else:
+            suppressed_alerts.append(alert)
+
+    # Прибираємо з стану метрики, які більше не активні (відхилення зникло)
+    for key in list(state.keys()):
+        if key not in current_keys:
+            del state[key]
+
+    save_alert_state(state)
+    return new_alerts, suppressed_alerts
 
 
 def connect_garmin() -> Garmin:
@@ -383,12 +447,21 @@ def check_daily_health(force_telegram: bool = False):
     # --- Формування повідомлення ---
     now_str = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
     lines = [f"📅 {now_str}"]
+
     if alerts:
-        lines.append("⚠️ Увага! Виявлено відхилення:")
-        for alert in alerts:
-            lines.append(f"- {alert['metric']}: {alert['value']} (норма: {alert['norm']})")
-            lines.append(f"  Можлива причина: {alert['cause']}")
-            lines.append(f"  Рекомендація: {alert['advice']}")
+        new_alerts, suppressed_alerts = dedupe_alerts(alerts)
+
+        if new_alerts:
+            lines.append("⚠️ Увага! Виявлено відхилення:")
+            for alert in new_alerts:
+                lines.append(f"- {alert['metric']}: {alert['value']} (норма: {alert['norm']})")
+                lines.append(f"  Можлива причина: {alert['cause']}")
+                lines.append(f"  Рекомендація: {alert['advice']}")
+
+        if suppressed_alerts:
+            lines.append("ℹ️ Досі стежимо (вже повідомлено раніше):")
+            for alert in suppressed_alerts:
+                lines.append(f"- {alert['metric']}: {alert['value']}")
     else:
         rhr = metrics.get("rhr", "N/A")
         hrv = metrics.get("hrv", "N/A")
