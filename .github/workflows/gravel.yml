@@ -2,8 +2,11 @@ name: Gravel Training Reminder
 
 on:
   schedule:
-    # Thursday 9:00 AM Kyiv time (EEST = UTC+3) → 6:00 UTC
+    # Thursday 9:00, 12:00, 15:00 Kyiv time (EEST = UTC+3)
+    # Резервні часи на випадок затримки GitHub Actions free runners
     - cron: "0 6 * * 4"
+    - cron: "0 9 * * 4"
+    - cron: "0 12 * * 4"
   workflow_dispatch:
 
 jobs:
@@ -22,4 +25,4 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python training_reminder.py --type gravel --telegram
+        run: python training_reminder.py --type gravel

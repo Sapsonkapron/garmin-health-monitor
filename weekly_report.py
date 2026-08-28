@@ -19,6 +19,7 @@ LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 VO2MAX_GOAL = 44
+STATE_FILE = DATA_DIR / "weekly_state.json"
 
 # --- Логування ---
 logging.basicConfig(
@@ -27,6 +28,37 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _read_state() -> dict:
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_state(state: dict):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Не вдалось зберегти weekly_state.json: {e}")
+
+
+def already_sent_this_week() -> bool:
+    """Чи вже генерували звіт за поточний тиждень?"""
+    state = _read_state()
+    return state.get("last_week") == get_week_dates(0)[0].isoformat()
+
+
+def mark_sent_this_week():
+    state = _read_state()
+    state["last_week"] = get_week_dates(0)[0].isoformat()
+    _write_state(state)
 
 
 def get_garmin_credentials():
@@ -198,6 +230,12 @@ def safe_avg(values: list) -> float | None:
 def generate_report():
     """Генерує тижневий звіт."""
     logger.info("Початок генерації тижневого звіту")
+
+    # Захист від дублювання в той самий тиждень
+    if already_sent_this_week():
+        logger.info("Звіт за поточний тиждень вже генерувався — пропускаємо")
+        print("Звіт за поточний тиждень вже генерувався")
+        return
 
     client = connect_garmin()
 
@@ -387,6 +425,7 @@ def generate_report():
     except Exception as e:
         logger.warning(f"Не вдалось зберегти звіт: {e}")
 
+    mark_sent_this_week()
     logger.info("Тижневий звіт згенеровано")
 
 

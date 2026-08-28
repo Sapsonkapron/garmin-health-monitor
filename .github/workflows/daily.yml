@@ -2,8 +2,12 @@ name: Daily Garmin Check
 
 on:
   schedule:
-    # 9:00 AM Kyiv time (EEST = UTC+3) → 6:00 UTC
+    # 9:00, 12:00, 15:00 Kyiv time (EEST = UTC+3)
+    # GitHub Actions free runners іноді затримують scheduled runs на години,
+    # тому використовуємо 3 резервні часи з захистом від дублювання в daily_check.py
     - cron: "0 6 * * *"
+    - cron: "0 9 * * *"
+    - cron: "0 12 * * *"
   workflow_dispatch:
 
 jobs:
@@ -37,7 +41,7 @@ jobs:
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python daily_check.py --telegram
+        run: python daily_check.py
 
       - name: Save alert state
         if: always()

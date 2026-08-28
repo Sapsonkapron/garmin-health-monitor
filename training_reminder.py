@@ -6,11 +6,13 @@
 
 import os
 import sys
+import json
 import random
 import argparse
 import urllib.request
 import urllib.parse
 from pathlib import Path
+from datetime import date
 
 # --- Повідомлення Gravel ---
 GRAVEL_MESSAGES = [
@@ -25,6 +27,8 @@ MESSAGES = {
     "gravel": GRAVEL_MESSAGES,
 }
 
+STATE_FILE = Path("/tmp/garmin_data/reminder_state.json")
+
 
 def load_env():
     env_path = Path(__file__).parent / ".env"
@@ -36,6 +40,36 @@ def load_env():
             continue
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip())
+
+
+def _read_state() -> dict:
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_state(state: dict):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Не вдалось зберегти стан: {e}", file=sys.stderr)
+
+
+def already_sent_today(reminder_type: str) -> bool:
+    state = _read_state()
+    return state.get(reminder_type) == date.today().isoformat()
+
+
+def mark_sent_today(reminder_type: str):
+    state = _read_state()
+    state[reminder_type] = date.today().isoformat()
+    _write_state(state)
 
 
 def send_telegram(text: str) -> bool:
@@ -68,18 +102,24 @@ def main():
         choices=["gravel"],
         help="Тип тренування: gravel",
     )
-    parser.add_argument("--telegram", action="store_true", help="Відправити повідомлення в Telegram")
+    parser.add_argument("--telegram", action="store_true", help="Примусово відправити повідомлення в Telegram (ігнорує захист від дублювання)")
     args = parser.parse_args()
 
     messages = MESSAGES[args.type]
     message = random.choice(messages)
     print(message)
 
-    if args.telegram:
-        if send_telegram(message):
-            print("✅ Відправлено в Telegram")
-        else:
-            sys.exit(1)
+    # Захист від дублювання в той самий день (для scheduled runs без --telegram)
+    should_send = args.telegram or not already_sent_today(args.type)
+    if not should_send:
+        print("Вже відправлено сьогодні — пропускаємо")
+        return
+
+    if send_telegram(message):
+        mark_sent_today(args.type)
+        print("✅ Відправлено в Telegram")
+    else:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

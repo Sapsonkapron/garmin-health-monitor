@@ -31,6 +31,42 @@ ALERT_STATE_FILE = DATA_DIR / "alert_state.json"
 REALERT_DAYS = 3  # через скільки днів повторно надіслати повний алерт, якщо відхилення не зникло
 
 
+def _read_state() -> dict:
+    """Читає весь стан алертів."""
+    if not ALERT_STATE_FILE.exists():
+        return {}
+    try:
+        with open(ALERT_STATE_FILE) as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Не вдалось прочитати alert_state.json: {e}")
+        return {}
+
+
+def _write_state(state: dict):
+    """Зберігає весь стан алертів."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(ALERT_STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Не вдалось зберегти alert_state.json: {e}")
+
+
+def already_sent_today() -> bool:
+    """Чи вже відправляли щоденний звіт сьогодні?"""
+    state = _read_state()
+    last_sent = state.get("_last_sent_date")
+    return last_sent == date.today().isoformat()
+
+
+def mark_sent_today():
+    """Позначає, що щоденний звіт вже відправлено сьогодні."""
+    state = _read_state()
+    state["_last_sent_date"] = date.today().isoformat()
+    _write_state(state)
+
+
 def get_garmin_credentials():
     """Отримує логін/пароль Garmin з env."""
     email = os.environ.get("GARMIN_EMAIL")
@@ -116,24 +152,20 @@ def is_send_time(hour: int = 9, tolerance_min: int = 5) -> bool:
 
 def load_alert_state() -> dict:
     """Завантажує стан попередніх алертів {метрика: дата останнього повного сповіщення}."""
-    if not ALERT_STATE_FILE.exists():
-        return {}
-    try:
-        with open(ALERT_STATE_FILE) as f:
-            return json.load(f)
-    except Exception as e:
-        logger.warning(f"Не вдалось прочитати alert_state.json: {e}")
-        return {}
+    state = _read_state()
+    # Видаляємо службові ключі
+    return {k: v for k, v in state.items() if not k.startswith("_")}
 
 
 def save_alert_state(state: dict):
-    """Зберігає стан алертів на диск."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(ALERT_STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2)
-    except Exception as e:
-        logger.warning(f"Не вдалось зберегти alert_state.json: {e}")
+    """Зберігає стан алертів на диск, зберігаючи службові ключі."""
+    full_state = _read_state()
+    # Оновлюємо тільки метрики, службові ключі залишаємо
+    for key in list(full_state.keys()):
+        if not key.startswith("_") and key not in state:
+            del full_state[key]
+    full_state.update(state)
+    _write_state(full_state)
 
 
 def dedupe_alerts(alerts: list) -> tuple:
@@ -226,6 +258,12 @@ def get_hrv_weekly(client: Garmin) -> list[int]:
 def check_daily_health(force_telegram: bool = False):
     """Основна функція перевірки здоров'я."""
     logger.info("Початок щоденної перевірки")
+
+    # Захист від повторної відправки в той самий день (для scheduled runs)
+    if not force_telegram and already_sent_today():
+        logger.info("Щоденний звіт вже відправлено сьогодні — пропускаємо")
+        print("Вже відправлено сьогодні")
+        return
 
     client = connect_garmin()
     today = date.today().isoformat()
@@ -478,6 +516,7 @@ def check_daily_health(force_telegram: bool = False):
     should_send = force_telegram or (alerts and is_send_time())
     if should_send:
         send_telegram(report)
+        mark_sent_today()
 
     logger.info(f"Перевірка завершена. Алертів: {len(alerts)}")
 
