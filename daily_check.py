@@ -513,7 +513,9 @@ def check_daily_health(force_telegram: bool = False):
     print(report)
 
     # --- Відправка в Telegram ---
-    should_send = force_telegram or (alerts and is_send_time())
+    # scheduled runs (без --telegram): відправляємо, лише якщо є алерти
+    # ручний запуск (--telegram): відправляємо завжди
+    should_send = force_telegram or bool(alerts)
     if should_send:
         send_telegram(report)
         mark_sent_today()
