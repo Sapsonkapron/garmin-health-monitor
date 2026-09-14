@@ -170,10 +170,12 @@ MED_EVENING_LINES = [
     "Кожен прийом — це інвестиція в тиск 120/80 без таблеток в майбутньому.",
 ]
 
-# --- Health RSS джерела (Україна) ---
+# --- Health RSS джерела ---
+# Українських consumer-health фідів майже немає: apteka.ua — фарма/медицина (УКР),
+# BBC Health — надійний міжнародний health-фід (ENG) як резерв.
 HEALTH_RSS_FEEDS = [
-    "https://tsn.ua/rss/zdorovya.xml",
-    "https://www.pravda.com.ua/rss/",
+    "https://apteka.ua/rss",
+    "https://feeds.bbci.co.uk/news/health/rss.xml",
 ]
 
 
