@@ -41,7 +41,7 @@ jobs:
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python daily_check.py
+        run: python daily_check.py ${{ github.event_name == 'workflow_dispatch' && '--telegram' || '' }}
 
       - name: Save alert state
         if: always()

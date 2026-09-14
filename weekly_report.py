@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import logging
+import argparse
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -389,12 +390,13 @@ def propose_challenge():
     return challenge["proposal"]
 
 
-def generate_report():
+def generate_report(force: bool = False):
     """Генерує тижневий звіт."""
     logger.info("Початок генерації тижневого звіту")
 
-    # Захист від дублювання в той самий тиждень
-    if already_sent_this_week():
+    # Захист від дублювання в той самий тиждень (для scheduled-резервів;
+    # workflow_dispatch через cron-job.org іде з --force)
+    if not force and already_sent_this_week():
         logger.info("Звіт за поточний тиждень вже генерувався — пропускаємо")
         print("Звіт за поточний тиждень вже генерувався")
         return
@@ -644,4 +646,8 @@ def generate_report():
 
 
 if __name__ == "__main__":
-    generate_report()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force", action="store_true",
+                        help="Ігнорувати захист від дублювання (для workflow_dispatch)")
+    args = parser.parse_args()
+    generate_report(force=args.force)
