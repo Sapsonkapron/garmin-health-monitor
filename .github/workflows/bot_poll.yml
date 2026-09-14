@@ -1,14 +1,17 @@
 name: Telegram Bot Poll
 
 on:
-  schedule:
-    # Щогодини (резерв; основний тригер — cron-job.org щогодини)
-    - cron: "15 * * * *"
   workflow_dispatch:
+
+# Кілька запусків не перетинаються: новий чекає в черзі, поки активний loop працює
+concurrency:
+  group: bot-poll
+  cancel-in-progress: false
 
 jobs:
   bot-poll:
     runs-on: ubuntu-latest
+    timeout-minutes: 340
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -31,13 +34,13 @@ jobs:
           restore-keys: |
             garmin-state-
 
-      - name: Poll Telegram updates
+      - name: Run bot listener loop
         env:
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python bot_listener.py
+        run: python bot_listener.py --loop --max-seconds 18900
 
       - name: Save bot state
         if: always()
