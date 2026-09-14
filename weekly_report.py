@@ -234,7 +234,8 @@ def safe_avg(values: list) -> float | None:
 
 
 def send_telegram(text: str) -> bool:
-    """Відправляє звіт у Telegram, розбиваючи на повідомлення ≤4000 символів."""
+    """Відправляє звіт у Telegram, розбиваючи на повідомлення ≤4000 символів.
+    HTML parse_mode: новина містить клікабельний лінк; прев'ю вимкнене."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -256,7 +257,12 @@ def send_telegram(text: str) -> bool:
 
     ok = True
     for chunk in chunks:
-        payload = {"chat_id": chat_id, "text": chunk}
+        payload = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
         data = urllib.parse.urlencode(payload).encode("utf-8")
         try:
             req = urllib.request.Request(url, data=data, method="POST")
@@ -267,6 +273,32 @@ def send_telegram(text: str) -> bool:
             logger.error(f"Помилка відправки в Telegram: {e}")
             ok = False
     return ok
+
+
+def escape_html(text: str) -> str:
+    """Екранує HTML-символи, зберігаючи згенерований anchor-тег новини."""
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+
+def translate_to_ukrainian(text: str) -> str | None:
+    """Переклад EN→UK через безкоштовний gtx-ендпоінт Google Translate.
+    Повертає None при збої (fallback на англійський текст)."""
+    if not text:
+        return None
+    try:
+        params = urllib.parse.urlencode({
+            "client": "gtx", "sl": "en", "tl": "uk", "dt": "t", "q": text,
+        })
+        url = f"https://translate.googleapis.com/translate_a/single?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return "".join(part[0] for part in data[0] if part[0]).strip()
+    except Exception as e:
+        logger.warning(f"Переклад недоступний: {e}")
+        return None
 
 
 def get_week_weights(client: Garmin, start: date, end: date) -> list[float]:
@@ -289,8 +321,9 @@ def get_week_weights(client: Garmin, start: date, end: date) -> list[float]:
         return []
 
 
-def get_fresh_health_news() -> tuple[str, str] | None:
-    """1 свіжий заголовок + лінк з health-RSS. None якщо збій або нема нових."""
+def get_fresh_health_news() -> dict | None:
+    """Свіжа новина з BBC Health: заголовок і короткий опис українською.
+    Повертає {title_uk, desc_uk, link} або None при збої/відсутності нових."""
     last_link = ast.get_last_news_link()
     for feed_url in ac.HEALTH_RSS_FEEDS:
         try:
@@ -299,11 +332,23 @@ def get_fresh_health_news() -> tuple[str, str] | None:
                 raw = resp.read()
             root = ET.fromstring(raw)
             for item in root.iter("item"):
-                title = (item.findtext("title") or "").strip()
+                title_en = (item.findtext("title") or "").strip()
                 link = (item.findtext("link") or "").strip()
-                if title and link and link != last_link:
-                    ast.set_last_news_link(link)
-                    return title, link
+                desc_en = (item.findtext("description") or "").strip()
+                if not title_en or not link or link == last_link:
+                    continue
+                ast.set_last_news_link(link)
+
+                title_uk = translate_to_ukrainian(title_en) or title_en
+                # Опис: 1-2 речення, перекладені
+                desc_uk = ""
+                if desc_en:
+                    sentences = [s.strip() for s in desc_en.split(". ") if s.strip()]
+                    short = ". ".join(sentences[:2])
+                    if short and not short.endswith("."):
+                        short += "."
+                    desc_uk = translate_to_ukrainian(short) or short
+                return {"title_uk": title_uk, "desc_uk": desc_uk, "link": link}
         except Exception as e:
             logger.warning(f"RSS {feed_url} недоступний: {e}")
             continue
@@ -543,13 +588,17 @@ def generate_report():
         streak_line += f" | {milestone}"
     report_lines.append(streak_line)
 
-    # Новина тижня
+    # Новина тижня (%%NEWS_ANCHOR%% — плейсхолдер для HTML-лінка)
+    news_anchor_html = ""
     news = get_fresh_health_news()
     if news:
         report_lines.append("")
-        report_lines.append("📰 Новина тижня про здоров'я:")
-        report_lines.append(f"   {news[0]}")
-        report_lines.append(f"   {news[1]}")
+        report_lines.append("📰 Новина тижня про здоров'я: %%NEWS_ANCHOR%%")
+        if news["desc_uk"]:
+            report_lines.append(f"   {news['desc_uk']}")
+        news_anchor_html = (
+            f'<a href="{news["link"]}">{escape_html(news["title_uk"])}</a>'
+        )
 
     # Пропозиція челенджу
     proposal = propose_challenge()
@@ -562,35 +611,34 @@ def generate_report():
             report_lines.append("")
             report_lines.append(f"🏆 Активний челендж: {active.get('challenge', {}).get('title')} — прогрес у ранкових звітах")
 
-    # Легенда
+    # Підказка про кнопки (легенда винесена у кнопку бота)
     report_lines.append("")
-    report_lines.append("📖 Що означають показники:")
-    report_lines.append("• VO2max — здатність організму використовувати кисень. Вище = витриваліший (твоя мета: 44)")
-    report_lines.append("• RHR — пульс у спокої. Нижче = серце сильніше і ефективніше")
-    report_lines.append("• HRV — гнучкість нервової системи. Вище = краще відновлення")
-    report_lines.append("• Stress — напруга організму (0-100). Нижче = спокійніший")
-    report_lines.append("• Body Battery — запас енергії (0-100). Заряджається сном")
-    report_lines.append("• Тиск — сила крові на стінки судин. Норма: 110-130/70-85")
-    report_lines.append("• Вага — трекінг маси тіла для контролю прогресу")
-    report_lines.append("• bpm — удари серця на хвилину")
+    report_lines.append("💡 Кнопки 'Що означають показники' і 'Аналіз тренування' — під ранковим повідомленням")
 
     # Вивід
     report = "\n".join(report_lines)
     print(report)
 
-    # Збереження
+    # Збереження (у файл — читабельна версія з лінком)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     report_file = DATA_DIR / f"weekly_report_{curr_start.isoformat()}.txt"
     try:
+        file_report = report
+        if news:
+            file_report = report.replace(
+                "%%NEWS_ANCHOR%%", f'{news["title_uk"]} — {news["link"]}')
         with open(report_file, "w") as f:
-            f.write(report)
+            f.write(file_report)
     except Exception as e:
         logger.warning(f"Не вдалось зберегти звіт: {e}")
 
     mark_sent_this_week()
 
-    # Відправка в Telegram
-    send_telegram(report)
+    # Відправка в Telegram (HTML: екрануємо все, крім anchor новини)
+    report_html = escape_html(report)
+    if news_anchor_html:
+        report_html = report_html.replace("%%NEWS_ANCHOR%%", news_anchor_html)
+    send_telegram(report_html)
 
     logger.info("Тижневий звіт згенеровано")
 

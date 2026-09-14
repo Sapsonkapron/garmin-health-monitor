@@ -119,8 +119,16 @@ def load_env():
         os.environ.setdefault(key.strip(), value.strip())
 
 
+ASSISTANT_KEYBOARD = {
+    "inline_keyboard": [[
+        {"text": "📖 Що означають показники", "callback_data": "legend"},
+        {"text": "🏃 Аналіз останнього тренування", "callback_data": "analyze_workout"},
+    ]]
+}
+
+
 def send_telegram(text: str) -> bool:
-    """Відправляє повідомлення в Telegram."""
+    """Відправляє повідомлення в Telegram з кнопками асистента."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -131,6 +139,7 @@ def send_telegram(text: str) -> bool:
     payload = {
         "chat_id": chat_id,
         "text": text[:4000],
+        "reply_markup": json.dumps(ASSISTANT_KEYBOARD),
     }
     data = urllib.parse.urlencode(payload).encode("utf-8")
     try:

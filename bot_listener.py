@@ -23,6 +23,7 @@ import urllib.parse
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
+import assistant_content as ac
 import assistant_state as ast
 
 LOG_DIR = Path(__file__).parent / "logs"
@@ -160,6 +161,117 @@ def handle_challenge_answer(answer: str) -> str | None:
     return None
 
 
+def analyze_last_workout() -> str:
+    """Rule-based аналіз останнього тренування з Garmin (еко-режим, без LLM)."""
+    from garminconnect import Garmin
+    try:
+        client = Garmin(os.environ["GARMIN_EMAIL"], os.environ["GARMIN_PASSWORD"])
+        client.login()
+        activities = client.get_activities(0, 5) or []
+    except Exception as e:
+        logger.error(f"Garmin недоступний: {e}")
+        return "❌ Не вдалось підключитись до Garmin Connect"
+    if not activities:
+        return "На Garmin поки немає записаних активностей. Почни з легкої прогулянки або Z2-сесії 20-30 хв 🙂"
+
+    act = activities[0]
+    name = act.get("activityName", "Тренування")
+    type_key = act.get("activityType", {}).get("typeKey", "")
+    start = act.get("startTimeLocal", "")[:16]
+    duration_min = (act.get("duration") or 0) / 60
+    distance_km = (act.get("distance") or 0) / 1000
+    avg_hr = act.get("averageHR")
+    max_hr = act.get("maxHR")
+    calories = act.get("calories")
+
+    lines = [f"🏃 Останнє тренування: {name} ({start})"]
+    parts = [f"⏱ {duration_min:.0f} хв"]
+    if distance_km > 0.1:
+        parts.append(f"📏 {distance_km:.1f} км")
+    if avg_hr:
+        parts.append(f"❤️ сер. {avg_hr:.0f} bpm")
+    if max_hr:
+        parts.append(f"макс {max_hr:.0f}")
+    if calories:
+        parts.append(f"🔥 {calories:.0f} ккал")
+    lines.append(" | ".join(parts))
+
+    # Пульс vs Z2
+    if avg_hr:
+        if avg_hr > ac.Z2_HIGH:
+            lines.append(
+                f"⚠️ Середній пульс {avg_hr:.0f} — вище Z2 ({ac.Z2_LOW}-{ac.Z2_HIGH}). "
+                "Для бази і VO2max важливіше йти ПОВІЛЬНІШЕ, але довше. Наступного разу сповільнись.")
+        elif avg_hr >= ac.Z2_LOW:
+            lines.append(
+                f"✅ Середній пульс {avg_hr:.0f} — ідеальна Z2 ({ac.Z2_LOW}-{ac.Z2_HIGH}). "
+                "Саме так будується база для VO2max.")
+        else:
+            lines.append(
+                f"ℹ️ Середній пульс {avg_hr:.0f} — нижче Z2 ({ac.Z2_LOW}-{ac.Z2_HIGH}). "
+                "Легке відновлення — ок; для прогресу VO2max тримай 118+ bpm.")
+
+    # Тривалість vs ціль тижня
+    week = ast.sport_week()
+    if week <= 2:
+        target = (20, 30)
+    elif week <= 4:
+        target = (30, 45)
+    else:
+        target = (40, 60)
+    if duration_min < target[0]:
+        lines.append(f"⏱ Тиждень {week}: ціль {target[0]}-{target[1]} хв — цього разу {duration_min:.0f}. Наступного разу додай {target[0] - duration_min:.0f}+ хв.")
+    elif duration_min > target[1] and week <= 4:
+        lines.append(f"⚠️ {duration_min:.0f} хв — більше плану тижня {week} ({target[0]}-{target[1]} хв). Повернення у спорт = поступовість. Не форсуй, щоб не зловити травму або перевтому.")
+    else:
+        lines.append(f"✅ Тривалість у межах плану тижня {week} ({target[0]}-{target[1]} хв).")
+
+    # Порівняння з попередньою активністю того ж типу
+    prev_same = next((a for a in activities[1:]
+                      if a.get("activityType", {}).get("typeKey", "") == type_key), None)
+    if prev_same and avg_hr and prev_same.get("averageHR"):
+        prev_speed = prev_same.get("averageSpeed")
+        curr_speed = act.get("averageSpeed")
+        hr_diff = avg_hr - prev_same["averageHR"]
+        if prev_speed and curr_speed and abs(curr_speed - prev_speed) / prev_speed < 0.05:
+            if hr_diff < -2:
+                lines.append(f"📈 Прогрес: той самий темп при пульсі на {abs(hr_diff):.0f} bpm нижче, ніж минулого разу!")
+            elif hr_diff > 3:
+                lines.append(f"ℹ️ Той самий темп, але пульс на {hr_diff:.0f} bpm вище — можлива втома або спека. Слідкуй за відновленням.")
+
+    # Рекомендація на завтра
+    if max_hr and max_hr > 165:
+        lines.append("💤 Завтра: легкий день (прогулянка) — сьогодні був високий пік пульсу.")
+    elif duration_min >= 45:
+        lines.append("💤 Завтра: легке Z2 або відпочинок — сьогодні солідний об'єм.")
+    else:
+        lines.append("💪 Завтра: можна продовжувати за планом тижня.")
+
+    return "\n".join(lines)
+
+
+def answer_callback_query(query_id: str):
+    """Знімає 'годинник' на кнопці після натискання."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
+    data = urllib.parse.urlencode({"callback_query_id": query_id}).encode("utf-8")
+    try:
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+    except Exception as e:
+        logger.warning(f"answerCallbackQuery не вдався: {e}")
+
+
+def handle_callback(data: str) -> str | None:
+    """Обробка натискань inline-кнопок."""
+    if data == "legend":
+        return ac.LEGEND_TEXT
+    if data == "analyze_workout":
+        return analyze_last_workout()
+    return None
+
+
 def process_text(text: str) -> str | None:
     """Обробка одного повідомлення. Повертає відповідь або None (ігнор)."""
     t = text.strip().lower()
@@ -167,6 +279,12 @@ def process_text(text: str) -> str | None:
     # Відповіді на челендж — мають пріоритет (короткі слова)
     if t in ("так", "ні", "стоп"):
         return handle_challenge_answer(t)
+
+    # Текстові дублі кнопок
+    if t in ("показники", "легенда"):
+        return ac.LEGEND_TEXT
+    if t in ("аналіз", "аналіз тренування", "останнє тренування"):
+        return analyze_last_workout()
 
     # Вага
     weight = parse_weight(text)
@@ -211,6 +329,21 @@ def main():
     new_offset = offset
     for update in updates.get("result", []):
         new_offset = update["update_id"]
+
+        # Натискання inline-кнопки
+        callback = update.get("callback_query")
+        if callback:
+            chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
+            data = callback.get("data", "")
+            answer_callback_query(callback.get("id", ""))
+            if chat_id == str(allowed_chat) and data:
+                logger.info(f"Callback: {data}")
+                reply = handle_callback(data)
+                if reply:
+                    send_telegram(reply)
+                    processed += 1
+            continue
+
         message = update.get("message", {})
         chat_id = str(message.get("chat", {}).get("id", ""))
         text = message.get("text", "")
