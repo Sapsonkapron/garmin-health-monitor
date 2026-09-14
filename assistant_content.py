@@ -146,7 +146,7 @@ CHALLENGES = [
     {
         "id": "burpee_50",
         "title": "50 берпі щодня, 7 днів",
-        "garmin_types": ["indoor_cardio", "strength_training", "cardio_training"],
+        "garmin_types": ["indoor_cardio", "strength_training", "cardio_training", "hiit", "crossfit"],
         "goal_desc": "50 берпі щодня (можна серіями по 10)",
         "proposal": "💪 Челендж тижня: 50 берпі щодня, 7 днів. Силове + кардіо в одному. Відповідай 'так', щоб прийняти!",
     },

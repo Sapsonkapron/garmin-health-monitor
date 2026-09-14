@@ -381,6 +381,10 @@ def get_challenge_progress(client: Garmin) -> list[str]:
         return [f"🏆 {title} — прогрес недоступний (Garmin)"]
 
     types = set(ch.get("garmin_types", []))
+    # Доповнюємо типи з каталогу — стан міг бути записаний до оновлення каталогу
+    for c in ac.CHALLENGES:
+        if c.get("id") == ch_id:
+            types.update(c.get("garmin_types", []))
     matched = [a for a in activities
                if a.get("activityType", {}).get("typeKey", "") in types]
 
