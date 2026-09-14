@@ -243,6 +243,12 @@ def send_telegram(text: str) -> bool:
         logger.warning("Telegram token або chat_id не налаштовані")
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    reply_markup = json.dumps({
+        "inline_keyboard": [[
+            {"text": "📖 Що означають показники", "callback_data": "legend"},
+            {"text": "🏃 Аналіз останнього тренування", "callback_data": "analyze_workout"},
+        ]]
+    }, ensure_ascii=False)
 
     # Розбиття по рядках
     chunks = []
@@ -263,6 +269,7 @@ def send_telegram(text: str) -> bool:
             "text": chunk,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
+            "reply_markup": reply_markup,
         }
         data = urllib.parse.urlencode(payload).encode("utf-8")
         try:

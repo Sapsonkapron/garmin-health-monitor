@@ -17,6 +17,8 @@ import os
 import re
 import sys
 import json
+import time
+import argparse
 import logging
 import urllib.request
 import urllib.parse
@@ -55,7 +57,7 @@ def load_env():
         os.environ.setdefault(key.strip(), value.strip())
 
 
-def send_telegram(text: str) -> bool:
+def send_telegram(text: str, reply_markup: dict | None = None) -> bool:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -63,6 +65,8 @@ def send_telegram(text: str) -> bool:
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text[:4000]}
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     data = urllib.parse.urlencode(payload).encode("utf-8")
     try:
         req = urllib.request.Request(url, data=data, method="POST")
@@ -75,13 +79,19 @@ def send_telegram(text: str) -> bool:
         return False
 
 
-def get_updates(offset: int | None):
+def get_updates(offset: int | None, long_poll_sec: int = 0):
+    """Отримує updates. long_poll_sec>0 — Telegram тримає з'єднання до появи update."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     url = f"https://api.telegram.org/bot{token}/getUpdates"
+    params = {}
     if offset is not None:
-        url += f"?offset={offset + 1}"
+        params["offset"] = offset + 1
+    if long_poll_sec:
+        params["timeout"] = long_poll_sec
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
     try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
+        with urllib.request.urlopen(url, timeout=long_poll_sec + 30) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         logger.error(f"Помилка getUpdates: {e}")
@@ -272,6 +282,29 @@ def handle_callback(data: str) -> str | None:
     return None
 
 
+def edit_callback_message(callback: dict):
+    """Прибирає кнопки зі старого повідомлення після натискання."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    message = callback.get("message", {})
+    message_id = message.get("message_id")
+    chat_id = message.get("chat", {}).get("id")
+    if not token or not message_id or not chat_id:
+        return
+    url = f"https://api.telegram.org/bot{token}/editMessageReplyMarkup"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": json.dumps({"inline_keyboard": []}),
+    }
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    try:
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+    except Exception as e:
+        logger.warning(f"Не вдалось оновити кнопки: {e}")
+
+
 def process_text(text: str) -> str | None:
     """Обробка одного повідомлення. Повертає відповідь або None (ігнор)."""
     t = text.strip().lower()
@@ -312,13 +345,38 @@ def process_text(text: str) -> str | None:
     return None
 
 
-def main():
-    load_env()
-    allowed_chat = os.environ.get("TELEGRAM_CHAT_ID")
-    if not os.environ.get("TELEGRAM_BOT_TOKEN") or not allowed_chat:
-        logger.error("Telegram не налаштований")
-        sys.exit(1)
+def handle_update(update: dict, allowed_chat: str) -> bool:
+    """Обробляє один update (callback або повідомлення). True якщо була відповідь."""
+    # Натискання inline-кнопки
+    callback = update.get("callback_query")
+    if callback:
+        chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
+        data = callback.get("data", "")
+        answer_callback_query(callback.get("id", ""))
+        if chat_id == allowed_chat and data:
+            edit_callback_message(callback)
+            logger.info(f"Callback: {data}")
+            reply = handle_callback(data)
+            if reply:
+                send_telegram(reply)
+                return True
+        return False
 
+    message = update.get("message", {})
+    chat_id = str(message.get("chat", {}).get("id", ""))
+    text = message.get("text", "")
+    if not text or chat_id != allowed_chat:
+        return False
+    logger.info(f"Отримано: {text}")
+    reply = process_text(text)
+    if reply:
+        send_telegram(reply)
+        return True
+    return False
+
+
+def run_once():
+    """Одноразовий прохід getUpdates (поточний режим bot_poll)."""
     offset = ast.get_telegram_offset()
     updates = get_updates(offset)
     if not updates.get("ok"):
@@ -329,30 +387,7 @@ def main():
     new_offset = offset
     for update in updates.get("result", []):
         new_offset = update["update_id"]
-
-        # Натискання inline-кнопки
-        callback = update.get("callback_query")
-        if callback:
-            chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
-            data = callback.get("data", "")
-            answer_callback_query(callback.get("id", ""))
-            if chat_id == str(allowed_chat) and data:
-                logger.info(f"Callback: {data}")
-                reply = handle_callback(data)
-                if reply:
-                    send_telegram(reply)
-                    processed += 1
-            continue
-
-        message = update.get("message", {})
-        chat_id = str(message.get("chat", {}).get("id", ""))
-        text = message.get("text", "")
-        if not text or chat_id != str(allowed_chat):
-            continue
-        logger.info(f"Отримано: {text}")
-        reply = process_text(text)
-        if reply:
-            send_telegram(reply)
+        if handle_update(update, str(os.environ["TELEGRAM_CHAT_ID"])):
             processed += 1
 
     if new_offset is not None:
@@ -362,5 +397,51 @@ def main():
     print(f"Оброблено: {processed}")
 
 
+def run_loop(max_seconds: int):
+    """Безперервний long-poll режим: кнопки відповідають за секунди.
+    Використовується лише коли репо публічне (Actions хвилини безлімітні)."""
+    offset = ast.get_telegram_offset()
+    deadline = time.monotonic() + max_seconds
+    processed = 0
+    last_beat = time.monotonic()
+    logger.info(f"Loop-режим: {max_seconds} c, offset={offset}")
+
+    while time.monotonic() < deadline:
+        updates = get_updates(offset, long_poll_sec=50)
+        if not updates.get("ok"):
+            time.sleep(30)  # назад після помилки мережі/API
+            continue
+        for update in updates.get("result", []):
+            offset = update["update_id"]
+            ast.set_telegram_offset(offset)
+            if handle_update(update, str(os.environ["TELEGRAM_CHAT_ID"])):
+                processed += 1
+        if time.monotonic() - last_beat > 600:
+            last_beat = time.monotonic()
+            logger.info(f"Пульс: оброблено {processed}")
+            print(f"Пульс: оброблено {processed}", flush=True)
+
+    logger.info(f"Loop завершено. Оброблено: {processed}")
+    print(f"Loop завершено. Оброблено: {processed}")
+
+
+def main():
+    load_env()
+    if not os.environ.get("TELEGRAM_BOT_TOKEN") or not os.environ.get("TELEGRAM_CHAT_ID"):
+        logger.error("Telegram не налаштований")
+        sys.exit(1)
+    run_once()
+
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--loop", action="store_true",
+                        help="Безперервний long-poll режим (24/7 bot)")
+    parser.add_argument("--max-seconds", type=int, default=18900,
+                        help="Максимальна тривалість loop-режиму (сек)")
+    args = parser.parse_args()
+    if args.loop:
+        load_env()
+        run_loop(args.max_seconds)
+    else:
+        main()
