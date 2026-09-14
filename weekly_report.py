@@ -8,10 +8,16 @@ import os
 import sys
 import json
 import logging
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import date, timedelta
 from pathlib import Path
 
 from garminconnect import Garmin
+
+import assistant_content as ac
+import assistant_state as ast
 
 # --- Конфігурація ---
 DATA_DIR = Path("/tmp/garmin_data")
@@ -227,6 +233,117 @@ def safe_avg(values: list) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def send_telegram(text: str) -> bool:
+    """Відправляє звіт у Telegram, розбиваючи на повідомлення ≤4000 символів."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        logger.warning("Telegram token або chat_id не налаштовані")
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    # Розбиття по рядках
+    chunks = []
+    current = ""
+    for line in text.split("\n"):
+        if len(current) + len(line) + 1 > 3900:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        chunks.append(current)
+
+    ok = True
+    for chunk in chunks:
+        payload = {"chat_id": chat_id, "text": chunk}
+        data = urllib.parse.urlencode(payload).encode("utf-8")
+        try:
+            req = urllib.request.Request(url, data=data, method="POST")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp.read()
+        except Exception as e:
+            logger.error(f"Помилка відправки в Telegram: {e}")
+            ok = False
+    return ok
+
+
+def get_week_weights(client: Garmin, start: date, end: date) -> list[float]:
+    """Ваги (кг) за тиждень з body composition."""
+    try:
+        bc = client.get_body_composition(start.isoformat(), end.isoformat())
+        entries = []
+        if isinstance(bc, dict):
+            entries = bc.get("dateWeightList", [])
+        elif isinstance(bc, list):
+            entries = bc
+        weights = []
+        for e in entries:
+            w = e.get("weight")
+            if w:
+                weights.append(w / 1000 if w > 1000 else float(w))
+        return weights
+    except Exception as e:
+        logger.warning(f"Не вдалось отримати вагу: {e}")
+        return []
+
+
+def get_fresh_health_news() -> tuple[str, str] | None:
+    """1 свіжий заголовок + лінк з health-RSS. None якщо збій або нема нових."""
+    last_link = ast.get_last_news_link()
+    for feed_url in ac.HEALTH_RSS_FEEDS:
+        try:
+            req = urllib.request.Request(feed_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read()
+            root = ET.fromstring(raw)
+            for item in root.iter("item"):
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                if title and link and link != last_link:
+                    ast.set_last_news_link(link)
+                    return title, link
+        except Exception as e:
+            logger.warning(f"RSS {feed_url} недоступний: {e}")
+            continue
+    return None
+
+
+def get_plan_execution(activities: list) -> list[str]:
+    """Виконання прогресивного плану тижня."""
+    week = ast.sport_week()
+    plan_info = None
+    for (w_from, w_to), info in ac.PROGRESSIVE_PLAN.items():
+        if w_from <= week <= w_to:
+            plan_info = info
+            break
+    if not plan_info:
+        return []
+    # кількість сесій за тиждень
+    target = 3 if week <= 4 else 4
+    done = len(activities)
+    status = "✅ виконано" if done >= target else f"⚠️ {done}/{target} сесій"
+    return [
+        f"📈 Повернення у форму — тиждень {week}: {status}",
+        f"   План був: {plan_info['plan']}",
+    ]
+
+
+def propose_challenge():
+    """Пропонує челендж на наступний тиждень (якщо немає активного/запропонованого)."""
+    if ast.get_active_challenge() or ast.get_pending_challenge():
+        return None
+    week_no = date.today().isocalendar()[1]
+    challenge = ac.CHALLENGES[week_no % len(ac.CHALLENGES)]
+    ast.set_pending_challenge({
+        "id": challenge["id"],
+        "title": challenge["title"],
+        "garmin_types": challenge["garmin_types"],
+    })
+    return challenge["proposal"]
+
+
 def generate_report():
     """Генерує тижневий звіт."""
     logger.info("Початок генерації тижневого звіту")
@@ -321,6 +438,22 @@ def generate_report():
 
     report_lines.append("")
 
+    # Вага / ІМТ
+    curr_weights = get_week_weights(client, curr_start, curr_end)
+    prev_weights = get_week_weights(client, prev_start, prev_end)
+    if curr_weights:
+        w_avg = safe_avg(curr_weights)
+        w_latest = curr_weights[-1]
+        bmi = ast.calc_bmi(w_latest)
+        line = f"⚖️ Вага: {w_latest:.1f} кг (ІМТ {bmi:.1f} — {ast.bmi_category(bmi)})"
+        if prev_weights:
+            w_prev = safe_avg(prev_weights)
+            diff = w_avg - w_prev
+            line += f" {trend_arrow(w_prev, w_avg)} ({diff:+.1f} кг до сер. попер. тижня)"
+        to_goal = w_latest - ast.TARGET_WEIGHT_KG
+        line += f" | до цілі {ast.TARGET_WEIGHT_KG:.0f} кг: {'-' if to_goal > 0 else '+'}{abs(to_goal):.1f}"
+        report_lines.append(line)
+
     # Тренування
     activities = curr_data["activities"]
     if activities:
@@ -347,12 +480,14 @@ def generate_report():
             report_lines.append(" | ".join(parts))
     else:
         report_lines.append("🏋️ Тренувань на Garmin за тиждень: 0")
-        report_lines.append("   (Нагадування: BJJ Пн/Ср/Пт не записується на Garmin — це нормально)")
 
     # Порівняння кількості тренувань
     prev_activities = prev_data["activities"]
     if activities or prev_activities:
         report_lines.append(f"   Порівняно з попереднім тижнем: {len(activities)} vs {len(prev_activities)}")
+
+    # Виконання прогресивного плану
+    report_lines.extend(get_plan_execution(activities))
 
     report_lines.append("")
 
@@ -400,6 +535,33 @@ def generate_report():
     if not good_signs and not bad_signs:
         report_lines.append("   Стабільний тиждень, без суттєвих змін.")
 
+    # Стрік без алкоголю
+    days = ast.streak_days()
+    streak_line = f"   🍺❌ Стрік без алкоголю: день {days}"
+    milestone = ac.milestone_message(days)
+    if milestone:
+        streak_line += f" | {milestone}"
+    report_lines.append(streak_line)
+
+    # Новина тижня
+    news = get_fresh_health_news()
+    if news:
+        report_lines.append("")
+        report_lines.append("📰 Новина тижня про здоров'я:")
+        report_lines.append(f"   {news[0]}")
+        report_lines.append(f"   {news[1]}")
+
+    # Пропозиція челенджу
+    proposal = propose_challenge()
+    if proposal:
+        report_lines.append("")
+        report_lines.append(proposal)
+    else:
+        active = ast.get_active_challenge()
+        if active:
+            report_lines.append("")
+            report_lines.append(f"🏆 Активний челендж: {active.get('challenge', {}).get('title')} — прогрес у ранкових звітах")
+
     # Легенда
     report_lines.append("")
     report_lines.append("📖 Що означають показники:")
@@ -426,6 +588,10 @@ def generate_report():
         logger.warning(f"Не вдалось зберегти звіт: {e}")
 
     mark_sent_this_week()
+
+    # Відправка в Telegram
+    send_telegram(report)
+
     logger.info("Тижневий звіт згенеровано")
 
 

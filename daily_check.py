@@ -16,6 +16,9 @@ from pathlib import Path
 
 from garminconnect import Garmin
 
+import assistant_content as ac
+import assistant_state as ast
+
 try:
     from zoneinfo import ZoneInfo
     KYIV_TZ = ZoneInfo("Europe/Kyiv")
@@ -253,6 +256,184 @@ def get_hrv_weekly(client: Garmin) -> list[int]:
         except Exception:
             continue
     return values
+
+
+def get_weight_data(client: Garmin) -> dict | None:
+    """Остання вага з Garmin + вага тиждень тому. Повертає dict або None."""
+    try:
+        end = date.today()
+        start = end - timedelta(days=10)
+        bc = client.get_body_composition(start.isoformat(), end.isoformat())
+        entries = []
+        if isinstance(bc, dict):
+            entries = bc.get("dateWeightList", [])
+        elif isinstance(bc, list):
+            entries = bc
+        parsed = []
+        for e in entries:
+            w = e.get("weight")
+            d = e.get("calendarDate") or e.get("date") or e.get("timestampGMT")
+            if w and d:
+                w_kg = w / 1000 if w > 1000 else float(w)
+                parsed.append((str(d)[:10], round(w_kg, 1)))
+        if not parsed:
+            return None
+        parsed.sort(key=lambda x: x[0])
+        latest_date, latest_w = parsed[-1]
+        week_ago_w = None
+        cutoff = (date.today() - timedelta(days=7)).isoformat()
+        older = [p for p in parsed if p[0] <= cutoff]
+        if older:
+            week_ago_w = older[-1][1]
+        return {"latest": latest_w, "latest_date": latest_date, "week_ago": week_ago_w}
+    except Exception as e:
+        logger.warning(f"Не вдалось отримати вагу: {e}")
+        return None
+
+
+def compute_day_color(metrics: dict, alerts: list) -> str:
+    """GREEN/YELLOW/RED — рекомендація по інтенсивності."""
+    alert_metrics = {a["metric"] for a in alerts}
+    # Червоний: критичні відновлювальні проблеми
+    if any("HRV" in m for m in alert_metrics):
+        return "RED"
+    if metrics.get("body_battery_max") is not None and metrics["body_battery_max"] < THRESHOLDS["body_battery_min"]:
+        return "RED"
+    if metrics.get("sleep_hours") is not None and metrics["sleep_hours"] < THRESHOLDS["sleep_min_hours"]:
+        return "RED"
+    if metrics.get("rhr") is not None and metrics["rhr"] > THRESHOLDS["rhr_max"]:
+        return "RED"
+    # Жовтий: неідеальне відновлення
+    if alerts:
+        return "YELLOW"
+    if metrics.get("body_battery_max") is not None and metrics["body_battery_max"] < 60:
+        return "YELLOW"
+    if metrics.get("stress") is not None and metrics["stress"] > 50:
+        return "YELLOW"
+    return "GREEN"
+
+
+def get_plan_block() -> list[str]:
+    """Блок прогресивного плану повернення у спорт."""
+    week = ast.sport_week()
+    for (w_from, w_to), info in ac.PROGRESSIVE_PLAN.items():
+        if w_from <= week <= w_to:
+            return [
+                f"📈 Повернення у форму — тиждень {week}:",
+                f"   План: {info['plan']}",
+                f"   Фокус: {info['focus']}",
+            ]
+    return []
+
+
+def get_weight_block(weight: dict | None) -> list[str]:
+    """Блок ваги/ІМТ."""
+    if not weight:
+        return []
+    latest = weight["latest"]
+    bmi = ast.calc_bmi(latest)
+    category = ast.bmi_category(bmi)
+    to_goal = latest - ast.TARGET_WEIGHT_KG
+    lines = [f"⚖️ Вага: {latest} кг (ІМТ {bmi:.1f} — {category}) | до цілі {ast.TARGET_WEIGHT_KG:.0f} кг: {'-' if to_goal > 0 else '+'}{abs(to_goal):.1f} кг"]
+    if weight.get("week_ago"):
+        diff = latest - weight["week_ago"]
+        arrow = "↓" if diff < 0 else ("↑" if diff > 0 else "→")
+        lines.append(f"   Тиждень тому: {weight['week_ago']} кг {arrow} ({diff:+.1f})")
+    lines.append(f"   💡 {ac.tip_of_the_day(ac.WEIGHT_LOSS_TIPS)}")
+    return lines
+
+
+def get_streak_block() -> list[str]:
+    """Блок стріку без алкоголю."""
+    days = ast.streak_days()
+    milestone = ac.milestone_message(days)
+    lines = [f"🍺❌ День {days} без алкоголю!"]
+    if milestone:
+        lines.append(f"   {milestone}")
+    lines.append(f"   {ac.tip_of_the_day(ac.ALCOHOL_FREE_MOTIVATION)}")
+    return lines
+
+
+def get_challenge_progress(client: Garmin) -> list[str]:
+    """Прогрес активного челенджу."""
+    challenge = ast.get_active_challenge()
+    if not challenge:
+        return []
+    ch = challenge.get("challenge", {})
+    start = challenge.get("start_date")
+    ch_id = ch.get("id", "")
+    title = ch.get("title", "Челендж")
+    if not start:
+        return []
+    try:
+        activities = client.get_activities_by_date(start, date.today().isoformat()) or []
+    except Exception as e:
+        logger.warning(f"Не вдалось отримати активності для челенджу: {e}")
+        return [f"🏆 {title} — прогрес недоступний (Garmin)"]
+
+    types = set(ch.get("garmin_types", []))
+    matched = [a for a in activities
+               if a.get("activityType", {}).get("typeKey", "") in types]
+
+    if ch_id in ("run_20k", "ride_100k"):
+        total_km = sum((a.get("distance") or 0) / 1000 for a in matched)
+        goal = 20 if ch_id == "run_20k" else 100
+        pct = min(100, total_km / goal * 100)
+        return [f"🏆 {title}: {total_km:.1f}/{goal} км ({pct:.0f}%)"]
+    elif ch_id == "walk_10k":
+        days_done = 0
+        start_d = date.fromisoformat(start)
+        d = start_d
+        while d <= date.today():
+            try:
+                steps_data = client.get_steps_data(d.isoformat()) or []
+                total = sum(s.get("steps", 0) for s in steps_data if isinstance(s, dict))
+                if total >= 10000:
+                    days_done += 1
+            except Exception:
+                pass
+            d += timedelta(days=1)
+        return [f"🏆 {title}: {days_done}/7 днів"]
+    else:
+        # берпі/скакалка: чест-система — дні з відповідною активністю
+        days = {a.get("startTimeLocal", "")[:10] for a in matched if a.get("startTimeLocal")}
+        return [f"🏆 {title}: {len(days)}/7 днів (відмічайся активністю на Garmin)"]
+
+
+def build_assistant_blocks(client: Garmin, metrics: dict, alerts: list) -> list[str]:
+    """Збирає всі блоки асистента для щоденного повідомлення."""
+    lines = []
+
+    # Колір дня
+    color = compute_day_color(metrics, alerts)
+    color_emoji = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}[color]
+    lines.append(f"🎯 День: {color_emoji} {color} — {ac.DAY_RECOMMENDATIONS[color]}")
+
+    # Прогресивний план
+    lines.extend(get_plan_block())
+
+    # Вага/ІМТ
+    lines.extend(get_weight_block(get_weight_data(client)))
+
+    # Ліки (ранок)
+    lines.append("💊 Ранковий прийом ліків — не забудь")
+
+    # Стрік
+    lines.extend(get_streak_block())
+
+    # Порада дня
+    lines.append(f"😴 Порада дня: {ac.tip_of_the_day(ac.SLEEP_HEALTH_TIPS)}")
+
+    # Челендж
+    challenge_lines = get_challenge_progress(client)
+    if challenge_lines:
+        lines.extend(challenge_lines)
+    else:
+        pending = ast.get_pending_challenge()
+        if pending:
+            lines.append(f"🏆 Запропоновано: {pending.get('title')} — відповідай 'так' або 'ні'")
+
+    return lines
 
 
 def check_daily_health(force_telegram: bool = False):
@@ -509,16 +690,19 @@ def check_daily_health(force_telegram: bool = False):
         bp = f"{metrics.get('bp_systolic', 'N/A')}/{metrics.get('bp_diastolic', 'N/A')}"
         lines.append(f"✅ Всі показники в нормі. RHR: {rhr}, HRV: {hrv}, Stress: {stress}, BB max: {bb}, Сон: {sleep}г, Тиск: {bp}")
 
+    # --- Блоки асистента (завжди) ---
+    lines.append("")
+    try:
+        lines.extend(build_assistant_blocks(client, metrics, alerts))
+    except Exception as e:
+        logger.warning(f"Не вдалось побудувати блоки асистента: {e}")
+
     report = "\n".join(lines)
     print(report)
 
-    # --- Відправка в Telegram ---
-    # scheduled runs (без --telegram): відправляємо, лише якщо є алерти
-    # ручний запуск (--telegram): відправляємо завжди
-    should_send = force_telegram or bool(alerts)
-    if should_send:
-        send_telegram(report)
-        mark_sent_today()
+    # --- Відправка в Telegram (завжди — корисний контент щодня) ---
+    send_telegram(report)
+    mark_sent_today()
 
     logger.info(f"Перевірка завершена. Алертів: {len(alerts)}")
 
