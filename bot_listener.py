@@ -177,12 +177,15 @@ def analyze_last_workout() -> str:
     try:
         client = Garmin(os.environ["GARMIN_EMAIL"], os.environ["GARMIN_PASSWORD"])
         client.login()
-        activities = client.get_activities(0, 5) or []
+        all_activities = client.get_activities(0, 15) or []
     except Exception as e:
         logger.error(f"Garmin недоступний: {e}")
         return "❌ Не вдалось підключитись до Garmin Connect"
+    # Пропускаємо нетренувальні активності (риболовля тощо)
+    activities = [a for a in all_activities
+                  if a.get("activityType", {}).get("typeKey", "") not in ast.EXCLUDED_ACTIVITY_TYPES]
     if not activities:
-        return "На Garmin поки немає записаних активностей. Почни з легкої прогулянки або Z2-сесії 20-30 хв 🙂"
+        return "На Garmin поки немає записаних тренувань. Почни з легкої прогулянки або Z2-сесії 20-30 хв 🙂"
 
     act = activities[0]
     name = act.get("activityName", "Тренування")

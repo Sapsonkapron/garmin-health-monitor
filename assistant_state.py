@@ -17,6 +17,9 @@ HEIGHT_CM = 179
 TARGET_WEIGHT_KG = 95.0
 SPORT_RETURN_DATE = date(2026, 9, 14)     # день 1 повернення у спорт
 
+# Активності Garmin, що НЕ є тренуваннями — не враховуються в аналізі і звітах
+EXCLUDED_ACTIVITY_TYPES = {"fishing", "fishing_v2"}
+
 
 def read_state() -> dict:
     if not STATE_FILE.exists():

@@ -184,11 +184,13 @@ def collect_week_data(client: Garmin, start: date, end: date) -> dict:
 
         current += timedelta(days=1)
 
-    # Activities за тиждень
+    # Activities за тиждень (без нетренувальних — риболовля тощо)
     try:
         activities = client.get_activities_by_date(start.isoformat(), end.isoformat())
         if activities:
             for act in activities:
+                if act.get("activityType", {}).get("typeKey", "") in ast.EXCLUDED_ACTIVITY_TYPES:
+                    continue
                 data["activities"].append({
                     "type": act.get("activityType", {}).get("typeKey", "unknown"),
                     "name": act.get("activityName", ""),
