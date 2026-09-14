@@ -1,0 +1,35 @@
+name: Init Challenge State
+on:
+  workflow_dispatch:
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/garmin_data
+          key: garmin-state-${{ github.run_id }}
+          restore-keys: garmin-state-
+      - name: Activate challenge
+        run: |
+          python3 << 'PY'
+          import json
+          from pathlib import Path
+          STATE = Path("/tmp/garmin_data/assistant_state.json")
+          STATE.parent.mkdir(parents=True, exist_ok=True)
+          state = json.loads(STATE.read_text()) if STATE.exists() else {}
+          state.pop("pending_challenge", None)
+          state["active_challenge"] = {
+              "challenge": {"id": "burpee_50", "title": "50 берпі щодня, 7 днів", "garmin_types": ["indoor_cardio", "strength_training", "cardio_training"]},
+              "start_date": "2026-09-14"
+          }
+          STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+          print("State updated:", json.dumps(state, indent=2))
+          PY
+      - name: Save state
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/garmin_data
+          key: garmin-state-${{ github.run_id }}
