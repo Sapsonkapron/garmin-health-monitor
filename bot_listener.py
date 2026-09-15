@@ -204,7 +204,18 @@ def analyze_last_workout() -> str:
     max_hr = act.get("maxHR")
     calories = act.get("calories")
 
-    lines = [f"🏃 Останнє тренування: {name} ({start})"]
+    # Активність у межах челенджу (напр., берпі як HIIT): поради про Z2-темп не застосовні
+    active = ast.get_active_challenge()
+    is_challenge_act = bool(
+        active
+        and type_key in (active.get("challenge", {}).get("garmin_types") or [])
+        and type_key in ("hiit", "crossfit", "strength_training", "indoor_cardio", "cardio_training")
+    )
+
+    if is_challenge_act:
+        lines = [f"🏆 Челендж: {active.get('challenge', {}).get('title')} — {name} ({start})"]
+    else:
+        lines = [f"🏃 Останнє тренування: {name} ({start})"]
     parts = [f"⏱ {duration_min:.0f} хв"]
     if distance_km > 0.1:
         parts.append(f"📏 {distance_km:.1f} км")
@@ -215,6 +226,13 @@ def analyze_last_workout() -> str:
     if calories:
         parts.append(f"🔥 {calories:.0f} ккал")
     lines.append(" | ".join(parts))
+
+    if is_challenge_act:
+        # Для челенджу головне — виконання, а не темп/тривалість
+        if avg_hr:
+            lines.append(f"💪 Пульс {avg_hr:.0f} (макс {max_hr:.0f}) — висока інтенсивність, це ОЧІКУВАНО для берпі. Це не Z2-робота, сповільнюватись не треба.")
+        lines.append(f"🎯 Ціль: {active.get('challenge', {}).get('goal_desc')}. Зараховано! Додатково можна додати спокійну Z2-сесію (вело/прогулянка) для бази — коли є час.")
+        return "\n".join(lines)
 
     # Пульс vs Z2
     if avg_hr:

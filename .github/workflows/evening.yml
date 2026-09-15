@@ -1,9 +1,6 @@
 name: Evening Medication Reminder
 
 on:
-  schedule:
-    # 20:00 Kyiv time (EEST = UTC+3) → 17:00 UTC (резерв; основний тригер — cron-job.org)
-    - cron: "0 17 * * *"
   workflow_dispatch:
 
 jobs:
@@ -30,7 +27,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python med_reminder.py ${{ github.event_name == 'workflow_dispatch' && '--telegram' || '' }}
+        run: python med_reminder.py
 
       - name: Save med state
         if: always()

@@ -11,11 +11,13 @@ import argparse
 import urllib.request
 import urllib.parse
 from pathlib import Path
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import assistant_content as ac
 
 STATE_FILE = Path("/tmp/garmin_data/med_state.json")
+KYIV = ZoneInfo("Europe/Kyiv")
 
 
 def load_env():
@@ -50,12 +52,12 @@ def _write_state(state: dict):
 
 
 def already_sent_today() -> bool:
-    return _read_state().get("evening_med") == date.today().isoformat()
+    return _read_state().get("evening_med") == datetime.now(KYIV).date().isoformat()
 
 
 def mark_sent_today():
     state = _read_state()
-    state["evening_med"] = date.today().isoformat()
+    state["evening_med"] = datetime.now(KYIV).date().isoformat()
     _write_state(state)
 
 
@@ -82,7 +84,6 @@ def send_telegram(text: str) -> bool:
 def main():
     load_env()
     parser = argparse.ArgumentParser(description="Вечірнє нагадування про ліки")
-    parser.add_argument("--telegram", action="store_true", help="Примусово відправити (ігнорує дедублікацію)")
     args = parser.parse_args()
 
     message = (
@@ -91,7 +92,7 @@ def main():
     )
     print(message)
 
-    if not args.telegram and already_sent_today():
+    if already_sent_today():
         print("Вже відправлено сьогодні — пропускаємо")
         return
 
