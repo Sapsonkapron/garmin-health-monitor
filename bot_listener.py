@@ -99,13 +99,18 @@ def get_updates(offset: int | None, long_poll_sec: int = 0):
 
 
 def parse_weight(text: str) -> float | None:
-    t = text.lower()
+    t = text.lower().strip()
     match = re.search(r"(\d+(?:[.,]\d+)?)\s*кг", t)
     if match:
         return float(match.group(1).replace(",", "."))
     match = re.search(r"вага\s+(\d+(?:[.,]\d+)?)", t)
     if match:
         return float(match.group(1).replace(",", "."))
+    # Голе число в межах ваги тіла (30-250 кг) — теж вага
+    if re.fullmatch(r"\d{2,3}(?:[.,]\d{1,2})?", t):
+        w = float(t.replace(",", "."))
+        if 30 <= w <= 250:
+            return w
     return None
 
 
@@ -344,6 +349,15 @@ def process_text(text: str) -> str | None:
                              datetime.now(KYIV_TZ).isoformat())
             return (f"🩸 Тиск {systolic}/{diastolic} збережено локально "
                     f"(Garmin недоступний). Врахую в звітах.")
+
+    # Невідоме повідомлення — підказка, щоб бот не мовчав
+    if len(t) <= 40:
+        return ("🤔 Не зрозумів. Ось що я вмію:\n"
+                "• вага: 106,7 або 106,7 кг\n"
+                "• тиск: 130/80 або 130/80/72\n"
+                "• аналіз — розбір останнього тренування\n"
+                "• показники — легенда метрик\n"
+                "• так / ні / стоп — відповіді на челендж")
 
     return None
 
