@@ -162,7 +162,7 @@ def handle_challenge_answer(answer: str) -> str | None:
 
     if answer == "ні":
         if not pending:
-            return None
+            return "Ок, запропонованого челенджу поки немає. Новий — у недільному звіті 🙂"
         ast.set_pending_challenge(None)
         return "Ок, цей челендж пропускаємо. Наступного тижня запропоную інший."
 
@@ -350,16 +350,13 @@ def process_text(text: str) -> str | None:
             return (f"🩸 Тиск {systolic}/{diastolic} збережено локально "
                     f"(Garmin недоступний). Врахую в звітах.")
 
-    # Невідоме повідомлення — підказка, щоб бот не мовчав
-    if len(t) <= 40:
-        return ("🤔 Не зрозумів. Ось що я вмію:\n"
-                "• вага: 106,7 або 106,7 кг\n"
-                "• тиск: 130/80 або 130/80/72\n"
-                "• аналіз — розбір останнього тренування\n"
-                "• показники — легенда метрик\n"
-                "• так / ні / стоп — відповіді на челендж")
-
-    return None
+    # Невідоме повідомлення — підказка, щоб бот ніколи не мовчав
+    return ("🤔 Не зрозумів. Ось що я вмію:\n"
+            "• вага: 106,7 або 106,7 кг\n"
+            "• тиск: 130/80 або 130/80/72\n"
+            "• аналіз — розбір останнього тренування\n"
+            "• показники — легенда метрик\n"
+            "• так / ні / стоп — відповіді на челендж")
 
 
 def handle_update(update: dict, allowed_chat: str) -> bool:
@@ -382,7 +379,14 @@ def handle_update(update: dict, allowed_chat: str) -> bool:
     message = update.get("message", {})
     chat_id = str(message.get("chat", {}).get("id", ""))
     text = message.get("text", "")
-    if not text or chat_id != allowed_chat:
+    if not text:
+        # Фото/стікер/голосове — відповідаємо підказкою, щоб не мовчати
+        if message and chat_id == allowed_chat:
+            send_telegram("🤔 Я поки розумію лише текст 🙂\n"
+                          "Напиши: аналіз, показники, вагу (106,7) або тиск (130/80)")
+            return True
+        return False
+    if chat_id != allowed_chat:
         return False
     logger.info(f"Отримано: {text}")
     reply = process_text(text)
