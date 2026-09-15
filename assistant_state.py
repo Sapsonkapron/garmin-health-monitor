@@ -121,6 +121,15 @@ def set_last_news_link(link: str):
     update_state(last_news_link=link)
 
 
+# --- AI-режим (звернення до бота як до AI-агента) ---
+def is_ai_mode() -> bool:
+    return bool(read_state().get("ai_mode", False))
+
+
+def set_ai_mode(enabled: bool):
+    update_state(ai_mode=enabled)
+
+
 # --- Локальні записи тиску (fallback, якщо write-API недоступне) ---
 def add_local_bp(systolic: int, diastolic: int, pulse: int, ts: str):
     state = read_state()

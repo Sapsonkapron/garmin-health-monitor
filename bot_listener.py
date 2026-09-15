@@ -11,6 +11,7 @@ Offset зберігається в assistant_state.json (кеш actions/cache).
   так                        → прийняти запропонований челендж
   ні                         → відхилити челендж
   стоп                       → скасувати активний челендж
+  агент                      → увімкнути/вимкнути AI-режим (Gemini з контекстом здоров'я)
 """
 
 import os
@@ -22,6 +23,7 @@ import argparse
 import logging
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
@@ -313,9 +315,165 @@ def edit_callback_message(callback: dict):
         logger.warning(f"Не вдалось оновити кнопки: {e}")
 
 
+# ============================================================
+# AI-режим: звернення до бота як до AI-агента (Gemini, безкоштовний tier)
+# ============================================================
+_garmin_cache = {"client": None, "ts": 0.0}
+_ai_context_cache = {"text": None, "ts": 0.0}
+
+AI_TOGGLE_WORDS = {"агент", "/агент", "ai", "/ai", "штучний інтелект"}
+
+
+def _get_garmin_cached():
+    """Garmin-клієнт з кешем на 1 годину (loop-процес живе 5+ годин)."""
+    if _garmin_cache["client"] and time.time() - _garmin_cache["ts"] < 3600:
+        return _garmin_cache["client"]
+    from garminconnect import Garmin
+    client = Garmin(os.environ["GARMIN_EMAIL"], os.environ["GARMIN_PASSWORD"])
+    client.login()
+    _garmin_cache.update(client=client, ts=time.time())
+    return client
+
+
+def _garmin_snapshot() -> str:
+    """Компактний знімок метрик за сьогодні/вчора для контексту LLM."""
+    client = _get_garmin_cached()
+    today = date.today().isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    lines = []
+    try:
+        for d in (today, yesterday):
+            hr = client.get_heart_rates(d) or {}
+            rhr = hr.get("restingHeartRate")
+            if rhr:
+                lines.append(f"RHR {d}: {rhr} bpm")
+                break
+    except Exception:
+        pass
+    try:
+        for d in (today, yesterday):
+            hrv = client.get_hrv_data(d) or {}
+            hrv_val = hrv.get("hrvSummary", {}).get("weeklyAvg") or hrv.get("lastNightAvg")
+            status = hrv.get("hrvSummary", {}).get("status")
+            if hrv_val or status:
+                if hrv_val:
+                    lines.append(f"HRV: {hrv_val:.0f} ms" + (f" ({status})" if status else ""))
+                break
+    except Exception:
+        pass
+    try:
+        bc = client.get_body_composition(yesterday, today)
+        weights = bc.get("dateWeightList", []) if isinstance(bc, dict) else bc
+        if weights:
+            w = weights[-1].get("weight")
+            if w:
+                w = w / 1000 if w > 1000 else float(w)
+                lines.append(f"Вага остання: {w:.1f} кг")
+    except Exception:
+        pass
+    try:
+        acts = client.get_activities(0, 3) or []
+        for a in acts:
+            tk = a.get("activityType", {}).get("typeKey", "")
+            if tk not in ast.EXCLUDED_ACTIVITY_TYPES:
+                dur = (a.get("duration") or 0) / 60
+                hr = a.get("averageHR")
+                lines.append(f"Останнє тренування: {a.get('activityName')} ({a.get('startTimeLocal','')[:10]}), "
+                             f"{dur:.0f} хв" + (f", сер. пульс {hr}" if hr else ""))
+                break
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
+def get_ai_context() -> str:
+    """Контекст користувача для LLM (кеш 30 хв)."""
+    if _ai_context_cache["text"] and time.time() - _ai_context_cache["ts"] < 1800:
+        return _ai_context_cache["text"]
+    parts = [
+        f"Дата: {date.today().isoformat()}",
+        f"Днів без алкоголю: {ast.streak_days()} (користувач кинув пити, підтримуй це)",
+        f"Тиждень повернення у спорт: {ast.sport_week()}. "
+        "План: тижні 1-2 — 3×Z2 20-30 хв; 3-4 — 3-4×Z2 30-45 хв; 5-6 — +легкі інтервали; 7+ — VO2max-інтервали",
+        f"Цілі: вага {ast.TARGET_WEIGHT_KG:.0f} кг (зріст {ast.HEIGHT_CM}), VO2max 44. Z2-пульс: 118-137 bpm",
+        "Приймає профілактичні медикаменти (НЕ називати конкретні препарати). BJJ поки не займається. Риболовля — не тренування.",
+    ]
+    active = ast.get_active_challenge()
+    if active:
+        parts.append(f"Активний челендж: {active.get('challenge', {}).get('title')} (з {active.get('start_date')})")
+    try:
+        snap = _garmin_snapshot()
+        if snap:
+            parts.append(snap)
+    except Exception as e:
+        logger.warning(f"Garmin-контекст недоступний: {e}")
+    text = "\n".join(parts)
+    _ai_context_cache.update(text=text, ts=time.time())
+    return text
+
+
+AI_SYSTEM_PROMPT = (
+    "Ти — персональний асистент здоров'я українською мовою. Тон: підтримуючий, дружній, конкретний. "
+    "Відповідай СТІСЛО (до 6 речень), без watermark'ів і пояснень про те, що ти ІІ. "
+    "Не став медичних діагнозів і не призначай ліки — при серйозних питаннях радь лікаря. "
+    "Спиратись на контекст користувача нижче."
+)
+
+
+def ask_gemini(text: str) -> str:
+    """Запит до Gemini (безкоштовний tier). Повертає текст відповіді."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return ("⚠️ AI-режим потребує безкоштовного ключа Gemini.\n"
+                "Отримати: aistudio.google.com/apikey (1 хвилина, безкартково).\n"
+                "Надішли мені ключ у Verdent — я налаштую.")
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{model}:generateContent?key={api_key}")
+    payload = {
+        "system_instruction": {"parts": [{"text": AI_SYSTEM_PROMPT + "\n\nКонтекст:\n" + get_ai_context()}]},
+        "contents": [{"parts": [{"text": text}]}],
+        "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7},
+    }
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        reply = (result.get("candidates", [{}])[0]
+                 .get("content", {}).get("parts", [{}])[0].get("text", "")).strip()
+        if not reply:
+            return "⚠️ Порожня відповідь від AI. Спробуй ще раз."
+        return reply
+    except urllib.error.HTTPError as e:
+        logger.error(f"Gemini HTTP {e.code}: {e.read()[:200]}")
+        if e.code == 429:
+            return "⏳ Ліміт запитів AI вичерпано (оновлюється щохвилини). Спробуй за хвилину."
+        if e.code == 400 and "API key" in str(e):
+            return "⚠️ Ключ Gemini невірний. Перезапиши GEMINI_API_KEY."
+        return f"⚠️ Помилка AI ({e.code}). Спробуй пізніше."
+    except Exception as e:
+        logger.error(f"Помилка Gemini: {e}")
+        return "⚠️ AI тимчасово недоступний. Спробуй пізніше."
+
+
 def process_text(text: str) -> str | None:
     """Обробка одного повідомлення. Повертає відповідь або None (ігнор)."""
     t = text.strip().lower()
+
+    # Перемикач AI-режиму (працює завжди, в обох режимах)
+    if t in AI_TOGGLE_WORDS:
+        if ast.is_ai_mode():
+            ast.set_ai_mode(False)
+            return ("🔄 AI-режим ВИМКНЕНО.\n"
+                    "Знову як до AI-агента: надішли 'агент'.")
+        ast.set_ai_mode(True)
+        return ("🤖 AI-режим УВІМКНЕНО!\n"
+                "Тепер пиши будь-що — я відповім як AI-асистент з твоїми даними "
+                "(стрік, вага, тренування, план).\n"
+                "Команди (вага/тиск/аналіз) працюють як завжди.\n"
+                "Вимкнути: надішли 'агент' ще раз.")
 
     # Відповіді на челендж — мають пріоритет (короткі слова)
     if t in ("так", "ні", "стоп"):
@@ -350,12 +508,17 @@ def process_text(text: str) -> str | None:
             return (f"🩸 Тиск {systolic}/{diastolic} збережено локально "
                     f"(Garmin недоступний). Врахую в звітах.")
 
+    # AI-режим: все невідоме йде до Gemini з контекстом здоров'я
+    if ast.is_ai_mode():
+        return ask_gemini(text)
+
     # Невідоме повідомлення — підказка, щоб бот ніколи не мовчав
     return ("🤔 Не зрозумів. Ось що я вмію:\n"
             "• вага: 106,7 або 106,7 кг\n"
             "• тиск: 130/80 або 130/80/72\n"
             "• аналіз — розбір останнього тренування\n"
             "• показники — легенда метрик\n"
+            "• агент — AI-режим (звертайся як до AI-асистента)\n"
             "• так / ні / стоп — відповіді на челендж")
 
 
