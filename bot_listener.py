@@ -204,16 +204,23 @@ def analyze_last_workout() -> str:
     max_hr = act.get("maxHR")
     calories = act.get("calories")
 
-    # Активність у межах челенджу (напр., берпі як HIIT): поради про Z2-темп не застосовні
+    # Активність у межах челенджу (напр., берпі як HIIT): поради про Z2-темп не застосовні.
+    # Fallback: інтенсивну сесію (берпі/HIIT/силову) розпізнаємо за типом активності
+    # навіть без стану челенджу — кеш GitHub Actions може губити active_challenge.
     active = ast.get_active_challenge()
-    is_challenge_act = bool(
-        active
-        and type_key in (active.get("challenge", {}).get("garmin_types") or [])
-        and type_key in ("hiit", "crossfit", "strength_training", "indoor_cardio", "cardio_training")
+    intensity_types = ("hiit", "crossfit", "strength_training", "indoor_cardio", "cardio_training")
+    name_l = (name or "").lower()
+    cardio_markers = ("вел", "ride", "біг", "run", "прогул", "walk", "gravel")
+    is_challenge_act = (
+        type_key in intensity_types
+        and not any(m in name_l for m in cardio_markers)
+        and (not active or type_key in (active.get("challenge", {}).get("garmin_types") or []))
     )
 
+    ch = (active or {}).get("challenge", {}) if is_challenge_act else {}
     if is_challenge_act:
-        lines = [f"🏆 Челендж: {active.get('challenge', {}).get('title')} — {name} ({start})"]
+        ch_title = ch.get("title") or "Челендж-сесія (берпі/інтервали)"
+        lines = [f"🏆 Челендж: {ch_title} — {name} ({start})"]
     else:
         lines = [f"🏃 Останнє тренування: {name} ({start})"]
     parts = [f"⏱ {duration_min:.0f} хв"]
@@ -231,7 +238,8 @@ def analyze_last_workout() -> str:
         # Для челенджу головне — виконання, а не темп/тривалість
         if avg_hr:
             lines.append(f"💪 Пульс {avg_hr:.0f} (макс {max_hr:.0f}) — висока інтенсивність, це ОЧІКУВАНО для берпі. Це не Z2-робота, сповільнюватись не треба.")
-        lines.append(f"🎯 Ціль: {active.get('challenge', {}).get('goal_desc')}. Зараховано! Додатково можна додати спокійну Z2-сесію (вело/прогулянка) для бази — коли є час.")
+        ch_goal = ch.get("goal_desc") or "виконати заплановану кількість повторень"
+        lines.append(f"🎯 Ціль: {ch_goal}. Зараховано! Додатково можна додати спокійну Z2-сесію (вело/прогулянка) для бази — коли є час.")
         return "\n".join(lines)
 
     # Пульс vs Z2

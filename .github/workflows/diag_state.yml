@@ -1,0 +1,66 @@
+name: Diagnose Bot State
+
+on:
+  workflow_dispatch:
+    inputs:
+      fix_challenge:
+        description: "Відновити active_challenge (burpee_50)"
+        type: boolean
+        default: false
+      start_date:
+        description: "Дата старту челенджу (YYYY-MM-DD), за потреби"
+        default: ""
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/garmin_data
+          key: garmin-state-diag-${{ github.run_id }}
+          restore-keys: |
+            garmin-state-
+
+      - name: Dump state
+        run: |
+          echo "=== files ==="
+          ls -la /tmp/garmin_data 2>/dev/null || echo "NO DIR"
+          echo "=== assistant_state.json ==="
+          cat /tmp/garmin_data/assistant_state.json 2>/dev/null || echo "MISSING"
+
+      - name: Fix challenge
+        if: ${{ github.event.inputs.fix_challenge == 'true' }}
+        env:
+          START_DATE: ${{ github.event.inputs.start_date }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path("/tmp/garmin_data/assistant_state.json")
+          state = json.loads(p.read_text()) if p.exists() else {}
+          start = os.environ.get("START_DATE") or "2026-09-14"
+          state["active_challenge"] = {
+              "challenge": {
+                  "id": "burpee_50",
+                  "title": "50 берпі щодня, 7 днів",
+                  "garmin_types": ["indoor_cardio", "strength_training", "cardio_training", "hiit", "crossfit"],
+                  "goal_desc": "50 берпі щодня (можна серіями по 10)",
+              },
+              "start_date": start,
+          }
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+          print("active_challenge відновлено, start_date =", start)
+          PY
+
+      - name: Save state
+        if: ${{ github.event.inputs.fix_challenge == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/garmin_data
+          key: garmin-state-diag-${{ github.run_id }}
