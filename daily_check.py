@@ -120,10 +120,15 @@ def load_env():
 
 
 ASSISTANT_KEYBOARD = {
-    "inline_keyboard": [[
-        {"text": "📖 Що означають показники", "callback_data": "legend"},
-        {"text": "🏃 Аналіз останнього тренування", "callback_data": "analyze_workout"},
-    ]]
+    "inline_keyboard": [
+        [
+            {"text": "📖 Що означають показники", "callback_data": "legend"},
+            {"text": "🏃 Аналіз останнього тренування", "callback_data": "analyze_workout"},
+        ],
+        [
+            {"text": "📋 Меню", "callback_data": "menu"},
+        ],
+    ]
 }
 
 
@@ -413,6 +418,75 @@ def get_challenge_progress(client: Garmin) -> list[str]:
         return [f"🏆 {title}: {len(days)}/7 днів (відмічайся активністю на Garmin)"]
 
 
+def ask_gemini_tip(prompt: str) -> str | None:
+    """Один виклик Gemini для поради дня. None при будь-якій помилці."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           "gemini-3.6-flash:generateContent?key=" + api_key)
+    payload = {
+        "system_instruction": {"parts": [{"text": (
+            "Ти дієтолог-асистент. Дай ОДНУ конкретну пораду по харчуванню "
+            "на сьогодні для цього користувача: 1-2 речення, українською, "
+            "практично і без води. Без медичних призначень і діагнозів."
+        )}]},
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": 200, "temperature": 0.7,
+                             "thinkingConfig": {"thinkingBudget": 0}},
+    }
+    try:
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode("utf-8"), method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        text = (result.get("candidates", [{}])[0]
+                .get("content", {}).get("parts", [{}])[0].get("text", "")).strip()
+        return text or None
+    except Exception as e:
+        logger.warning(f"Gemini-порада недоступна: {e}")
+        return None
+
+
+def get_nutrition_block(client: Garmin, metrics: dict) -> list[str]:
+    """Ціль калорій + порада дня (AI з fallback на статичний банк)."""
+    weight_data = get_weight_data(client)
+    weight = weight_data["latest"] if weight_data else 105.0
+    kcal, protein, water = ast.calc_calorie_target(weight)
+    lines = [f"🍽 Харчування: ціль ~{kcal} ккал | білок ~{protein} г | вода ~{water} л"]
+
+    # Порада дня: кеш → AI → статичний банк
+    tip = ast.get_daily_tip()
+    if tip:
+        lines.append(f"💡 {tip}")
+        return lines
+
+    context = [
+        f"Вага: {weight} кг (ціль {ast.TARGET_WEIGHT_KG:.0f} кг), ціль {kcal} ккал/день, "
+        f"білок {protein} г, вода {water} л.",
+        f"Днів без алкоголю: {ast.streak_days()}. Тиждень повернення у спорт: {ast.sport_week()} "
+        f"(тижні 1-2: 3 легкі сесії Z2 20-30 хв).",
+    ]
+    if metrics.get("sleep_hours"):
+        context.append(f"Сон вчора: {metrics['sleep_hours']} год.")
+    try:
+        acts = client.get_activities(0, 3) or []
+        for a in acts:
+            tk = a.get("activityType", {}).get("typeKey", "")
+            if tk not in ast.EXCLUDED_ACTIVITY_TYPES:
+                context.append(
+                    f"Вчора/сьогодні тренування: {a.get('activityName')}, "
+                    f"{(a.get('duration') or 0) / 60:.0f} хв.")
+                break
+    except Exception:
+        pass
+    tip = ask_gemini_tip("\n".join(context)) or ac.tip_of_the_day(ac.NUTRITION_FALLBACK_TIPS)
+    ast.set_daily_tip(tip)
+    lines.append(f"💡 {tip}")
+    return lines
+
+
 def build_assistant_blocks(client: Garmin, metrics: dict, alerts: list) -> list[str]:
     """Збирає всі блоки асистента для щоденного повідомлення."""
     lines = []
@@ -428,14 +502,18 @@ def build_assistant_blocks(client: Garmin, metrics: dict, alerts: list) -> list[
     # Вага/ІМТ
     lines.extend(get_weight_block(get_weight_data(client)))
 
+    # Харчування: ціль калорій + AI-порада дня
+    try:
+        lines.extend(get_nutrition_block(client, metrics))
+    except Exception as e:
+        logger.warning(f"Не вдалось побудувати блок харчування: {e}")
+        lines.append(f"😴 Порада дня: {ac.tip_of_the_day(ac.SLEEP_HEALTH_TIPS)}")
+
     # Ліки (ранок)
     lines.append("💊 Ранковий прийом ліків — не забудь")
 
     # Стрік
     lines.extend(get_streak_block())
-
-    # Порада дня
-    lines.append(f"😴 Порада дня: {ac.tip_of_the_day(ac.SLEEP_HEALTH_TIPS)}")
 
     # Челендж
     challenge_lines = get_challenge_progress(client)

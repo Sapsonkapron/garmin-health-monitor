@@ -16,6 +16,10 @@ STREAK_START_DATE = date(2026, 9, 6)      # день 1 без алкоголю (
 HEIGHT_CM = 179
 TARGET_WEIGHT_KG = 95.0
 SPORT_RETURN_DATE = date(2026, 9, 14)     # день 1 повернення у спорт
+AGE_YEARS = 37                            # для BMR (Mifflin-St Jeor)
+ACTIVITY_FACTOR = 1.3                     # сидячий ритм поза тренуваннями (~5000 кроків)
+CALORIE_DEFICIT = 500                     # помірний дефіцит для схуднення
+PROTEIN_PER_KG = 1.6                      # г білка на кг ЦІЛЬОВОЇ ваги
 
 # Активності Garmin, що НЕ є тренуваннями — не враховуються в аналізі і звітах
 EXCLUDED_ACTIVITY_TYPES = {"fishing", "fishing_v2"}
@@ -128,6 +132,32 @@ def is_ai_mode() -> bool:
 
 def set_ai_mode(enabled: bool):
     update_state(ai_mode=enabled)
+
+
+# --- Харчування: денна ціль + кеш поради дня ---
+def calc_calorie_target(weight_kg: float) -> tuple[int, int, float]:
+    """(kcal_ціль, білок_г, вода_л) з актуальної ваги. Mifflin-St Jeor, чол."""
+    bmr = 10 * weight_kg + 6.25 * HEIGHT_CM - 5 * AGE_YEARS + 5
+    tdee = bmr * ACTIVITY_FACTOR
+    target = max(tdee - CALORIE_DEFICIT, bmr)  # не нижче BMR
+    kcal = int(round(target / 50.0) * 50)
+    protein = int(PROTEIN_PER_KG * TARGET_WEIGHT_KG)
+    water = round(weight_kg * 0.03, 1)  # ~30 мл/кг
+    return kcal, protein, water
+
+
+def get_daily_tip(day: str | None = None) -> str | None:
+    """Порада дня, якщо вже генерувалась для цієї дати (кеш від дублів)."""
+    d = day or date.today().isoformat()
+    tip = read_state().get("daily_tip")
+    if tip and tip.get("date") == d:
+        return tip.get("text")
+    return None
+
+
+def set_daily_tip(text: str, day: str | None = None):
+    d = day or date.today().isoformat()
+    update_state(daily_tip={"date": d, "text": text})
 
 
 # --- Локальні записи тиску (fallback, якщо write-API недоступне) ---

@@ -289,6 +289,8 @@ def handle_callback(data: str) -> str | None:
         return ac.LEGEND_TEXT
     if data == "analyze_workout":
         return analyze_last_workout()
+    if data == "menu":
+        return ac.MENU_TEXT
     return None
 
 
@@ -333,6 +335,24 @@ def _get_garmin_cached():
     client.login()
     _garmin_cache.update(client=client, ts=time.time())
     return client
+
+
+def _get_weight_cached() -> float | None:
+    """Остання вага з Garmin (кг) або None."""
+    client = _get_garmin_cached()
+    end = date.today().isoformat()
+    start = (date.today() - timedelta(days=10)).isoformat()
+    bc = client.get_body_composition(start, end)
+    entries = bc.get("dateWeightList", []) if isinstance(bc, dict) else (bc or [])
+    parsed = []
+    for e in entries:
+        w = e.get("weight")
+        if w:
+            parsed.append((str(e.get("calendarDate") or ""), w / 1000 if w > 1000 else float(w)))
+    if not parsed:
+        return None
+    parsed.sort(key=lambda x: x[0])
+    return parsed[-1][1]
 
 
 def _garmin_snapshot() -> str:
@@ -398,6 +418,14 @@ def get_ai_context() -> str:
         f"Цілі: вага {ast.TARGET_WEIGHT_KG:.0f} кг (зріст {ast.HEIGHT_CM}), VO2max 44. Z2-пульс: 118-137 bpm",
         "Приймає профілактичні медикаменти (НЕ називати конкретні препарати). BJJ поки не займається. Риболовля — не тренування.",
     ]
+    try:
+        snap_w = _get_weight_cached()
+        if snap_w:
+            kcal, protein, water = ast.calc_calorie_target(snap_w)
+            parts.append(f"Харчування: ціль ~{kcal} ккал/день, білок ~{protein} г, "
+                         f"вода ~{water} л (дефіцит для схуднення)")
+    except Exception as e:
+        logger.warning(f"Контекст харчування недоступний: {e}")
     active = ast.get_active_challenge()
     if active:
         parts.append(f"Активний челендж: {active.get('challenge', {}).get('title')} (з {active.get('start_date')})")
@@ -462,6 +490,19 @@ def ask_gemini(text: str) -> str:
 def process_text(text: str) -> str | None:
     """Обробка одного повідомлення. Повертає відповідь або None (ігнор)."""
     t = text.strip().lower()
+
+    # /-команди (нативне меню Telegram) → мапінг на текстові
+    SLASH_MAP = {
+        "/menu": "меню", "/help": "меню", "/start": "меню",
+        "/analyze": "аналіз", "/legend": "показники",
+        "/agent": "агент", "/stop": "стоп",
+    }
+    if t in SLASH_MAP:
+        t = SLASH_MAP[t]
+
+    # Меню
+    if t == "меню":
+        return ac.MENU_TEXT
 
     # Перемикач AI-режиму (працює завжди, в обох режимах)
     if t in AI_TOGGLE_WORDS:
