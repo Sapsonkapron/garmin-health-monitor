@@ -427,13 +427,14 @@ def ask_gemini(text: str) -> str:
         return ("⚠️ AI-режим потребує безкоштовного ключа Gemini.\n"
                 "Отримати: aistudio.google.com/apikey (1 хвилина, безкартково).\n"
                 "Надішли мені ключ у Verdent — я налаштую.")
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{model}:generateContent?key={api_key}")
     payload = {
         "system_instruction": {"parts": [{"text": AI_SYSTEM_PROMPT + "\n\nКонтекст:\n" + get_ai_context()}]},
         "contents": [{"parts": [{"text": text}]}],
-        "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7},
+        "generationConfig": {"maxOutputTokens": 600, "temperature": 0.7,
+                             "thinkingConfig": {"thinkingBudget": 0}},
     }
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), method="POST")
