@@ -211,10 +211,17 @@ def analyze_last_workout() -> str:
     intensity_types = ("hiit", "crossfit", "strength_training", "indoor_cardio", "cardio_training")
     name_l = (name or "").lower()
     cardio_markers = ("вел", "ride", "біг", "run", "прогул", "walk", "gravel")
+    # Типи челенджу доповнюємо з каталогу — стан міг бути записаний до оновлення каталогу
+    ch_types = set()
+    if active:
+        ch_types.update(active.get("challenge", {}).get("garmin_types") or [])
+        for c in ac.CHALLENGES:
+            if c.get("id") == active.get("challenge", {}).get("id"):
+                ch_types.update(c.get("garmin_types") or [])
     is_challenge_act = (
         type_key in intensity_types
         and not any(m in name_l for m in cardio_markers)
-        and (not active or type_key in (active.get("challenge", {}).get("garmin_types") or []))
+        and (not ch_types or type_key in ch_types)
     )
 
     ch = (active or {}).get("challenge", {}) if is_challenge_act else {}
