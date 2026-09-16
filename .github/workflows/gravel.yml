@@ -1,12 +1,8 @@
 name: Gravel Training Reminder
 
 on:
-  schedule:
-    # Thursday 9:00, 12:00, 15:00 Kyiv time (EEST = UTC+3)
-    # Резервні часи на випадок затримки GitHub Actions free runners
-    - cron: "0 6 * * 4"
-    - cron: "0 9 * * 4"
-    - cron: "0 12 * * 4"
+  # Єдиний тригер — cron-job.org (четвер 9:00 Kyiv). GitHub schedule прибрано
+  # (затримки + дублювання нагадувань).
   workflow_dispatch:
 
 jobs:
