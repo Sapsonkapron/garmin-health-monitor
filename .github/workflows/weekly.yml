@@ -1,11 +1,8 @@
 name: Weekly Garmin Report
 
 on:
-  schedule:
-    # Sunday 18:00, 21:00 Kyiv time (EEST = UTC+3)
-    # Резервний час на випадок затримки GitHub Actions free runners
-    - cron: "0 15 * * 0"
-    - cron: "0 18 * * 0"
+  # Єдиний тригер — cron-job.org (неділя 18:00 Kyiv). GitHub schedule прибрано
+  # (затримки + дублювання звітів).
   workflow_dispatch:
 
 jobs:
