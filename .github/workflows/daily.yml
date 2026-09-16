@@ -1,13 +1,8 @@
 name: Daily Garmin Check
 
 on:
-  schedule:
-    # 9:00, 12:00, 15:00 Kyiv time (EEST = UTC+3)
-    # GitHub Actions free runners іноді затримують scheduled runs на години,
-    # тому використовуємо 3 резервні часи з захистом від дублювання в daily_check.py
-    - cron: "0 6 * * *"
-    - cron: "0 9 * * *"
-    - cron: "0 12 * * *"
+  # Єдиний тригер — cron-job.org (9:00 Kyiv). GitHub schedule прибрано:
+  # його затримки + гонка кешів з bot-loop створювали дублі звітів.
   workflow_dispatch:
 
 jobs:
