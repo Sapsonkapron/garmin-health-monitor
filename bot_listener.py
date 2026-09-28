@@ -152,7 +152,7 @@ def handle_challenge_answer(answer: str) -> str | None:
 
     if answer == "так":
         if not pending:
-            return "Немає запропонованого челенджу. Зачекай недільного звіту 🙂"
+            return "Немає запропонованого челенджу. Нова пропозиція — у завтрашньому ранковому звіті 🙂"
         if active:
             return f"Вже є активний челендж: {active.get('challenge', {}).get('title')}. Надішли 'стоп', щоб скасувати."
         ast.set_active_challenge({
@@ -164,16 +164,16 @@ def handle_challenge_answer(answer: str) -> str | None:
 
     if answer == "ні":
         if not pending:
-            return "Ок, запропонованого челенджу поки немає. Новий — у недільному звіті 🙂"
+            return "Ок, запропонованого челенджу поки немає. Нова пропозиція — у ранковому звіті 🙂"
         ast.set_pending_challenge(None)
-        return "Ок, цей челендж пропускаємо. Наступного тижня запропоную інший."
+        return "Ок, цей челендж пропускаємо. Завтра вранці запропоную інший."
 
     if answer == "стоп":
         if not active:
             return "Немає активного челенджу."
         title = active.get("challenge", {}).get("title", "Челендж")
         ast.set_active_challenge(None)
-        return f"Челендж '{title}' скасовано. Пропозиція нового — у недільному звіті."
+        return f"Челендж '{title}' скасовано. Нова пропозиція — у ранковому звіті."
 
     return None
 
