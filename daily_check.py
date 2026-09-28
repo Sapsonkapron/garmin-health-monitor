@@ -520,9 +520,15 @@ def build_assistant_blocks(client: Garmin, metrics: dict, alerts: list) -> list[
     if challenge_lines:
         lines.extend(challenge_lines)
     else:
-        pending = ast.get_pending_challenge()
-        if pending:
-            lines.append(f"🏆 Запропоновано: {pending.get('title')} — відповідай 'так' або 'ні'")
+        # Щоденна пропозиція нового челенджу, поки користувач не підтвердить.
+        # Ротація за датою — кожен день інший челендж з каталогу.
+        ch = ac.CHALLENGES[date.today().toordinal() % len(ac.CHALLENGES)]
+        ast.set_pending_challenge({
+            "id": ch["id"],
+            "title": ch["title"],
+            "garmin_types": ch["garmin_types"],
+        })
+        lines.append(ch["proposal"])
 
     return lines
 
