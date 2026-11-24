@@ -15,7 +15,7 @@ jobs:
           restore-keys: garmin-state-
       - name: Store migration state
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.MIGRATION_GITHUB_TOKEN }}
         run: |
           if [ ! -s /tmp/garmin_data/assistant_state.json ]; then
             echo "State missing"; exit 1
