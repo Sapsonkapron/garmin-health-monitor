@@ -1,0 +1,26 @@
+name: Init Challenge State
+on:
+  workflow_dispatch:
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Activate burpee challenge
+        env:
+          MONITOR_STORE_URL: ${{ secrets.MONITOR_STORE_URL }}
+          MONITOR_STORE_SECRET: ${{ secrets.MONITOR_STORE_SECRET }}
+        run: |
+          python3 - <<'PY'
+          import storage
+          storage.update_state(
+              pending_challenge=None,
+              active_challenge={
+                  "challenge": {
+                      "id": "burpee_50",
+                      "title": "50 берпі щодня, 7 днів",
+                  },
+                  "start_date": "2026-09-14",
+              },
+          )
+          print("Челендж активовано; особисті дані не виводяться")
+          PY
