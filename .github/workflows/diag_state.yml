@@ -26,12 +26,13 @@ jobs:
           restore-keys: |
             garmin-state-
 
-      - name: Dump state
+      - name: Check state presence
         run: |
-          echo "=== files ==="
-          ls -la /tmp/garmin_data 2>/dev/null || echo "NO DIR"
-          echo "=== assistant_state.json ==="
-          cat /tmp/garmin_data/assistant_state.json 2>/dev/null || echo "MISSING"
+          if [ -f /tmp/garmin_data/assistant_state.json ]; then
+            echo "Assistant state exists"
+          else
+            echo "Assistant state missing"
+          fi
 
       - name: Fix challenge
         if: ${{ github.event.inputs.fix_challenge == 'true' }}
