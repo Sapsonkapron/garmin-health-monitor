@@ -37,7 +37,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python daily_check.py ${{ github.event_name == 'workflow_dispatch' && '--telegram' || '' }}
+          MONITOR_STORE_URL: ${{ secrets.MONITOR_STORE_URL }}
+          MONITOR_STORE_SECRET: ${{ secrets.MONITOR_STORE_SECRET }}
+        run: python daily_check.py
 
       - name: Save alert state
         if: always()
