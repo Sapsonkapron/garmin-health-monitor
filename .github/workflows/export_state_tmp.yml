@@ -2,7 +2,7 @@ name: Temporary State Export
 on:
   workflow_dispatch:
 concurrency:
-  group: bot-poll
+  group: bot-export
   cancel-in-progress: false
 jobs:
   export:
