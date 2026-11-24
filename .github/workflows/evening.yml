@@ -27,11 +27,8 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MONITOR_STORE_URL: ${{ secrets.MONITOR_STORE_URL }}
+          MONITOR_STORE_SECRET: ${{ secrets.MONITOR_STORE_SECRET }}
         run: python med_reminder.py
 
-      - name: Save med state
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/garmin_data
-          key: garmin-state-${{ github.run_id }}
+
