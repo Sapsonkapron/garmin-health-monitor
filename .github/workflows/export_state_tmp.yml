@@ -1,0 +1,23 @@
+name: Temporary State Export
+on:
+  workflow_dispatch:
+concurrency:
+  group: bot-poll
+  cancel-in-progress: false
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache/restore@v4
+        with:
+          path: /tmp/garmin_data
+          key: garmin-state-${{ github.run_id }}
+          restore-keys: garmin-state-
+      - name: Store migration state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -s /tmp/garmin_data/assistant_state.json ]; then
+            echo "State missing"; exit 1
+          fi
+          gh gist create /tmp/garmin_data/assistant_state.json --filename migration.json
