@@ -42,6 +42,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+KEYBOARD = {
+    "keyboard": [
+        [{"text": "Додати їжу"}, {"text": "Їжа за день"}],
+        [{"text": "Підтвердити страву"}, {"text": "Скасувати оцінку"}],
+        [{"text": "Видалити останній запис"}, {"text": "Профіль"}],
+        [{"text": "Змінити профіль"}, {"text": "Аналіз тренування"}],
+        [{"text": "Ввести вагу"}, {"text": "Ввести тиск"}],
+        [{"text": "Показники"}, {"text": "AI-асистент"}, {"text": "Довідка"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
+BUTTON_COMMANDS = {
+    "Їжа за день": "/food",
+    "Підтвердити страву": "/food_confirm",
+    "Скасувати оцінку": "/food_cancel",
+    "Профіль": "/profile",
+    "Аналіз тренування": "/analyze",
+    "Показники": "/legend",
+    "AI-асистент": "/agent",
+    "Довідка": "/menu",
+}
+
+INPUT_BUTTONS = {
+    "Додати їжу": ("food", "Надішли фото їжі або її опис і приблизну вагу, наприклад: 150 г курки, 100 г рису."),
+    "Змінити профіль": ("profile", "Надішли стать (ч/ж), вік, зріст у см і цільову вагу в кг через пробіл. Наприклад: ч 37 179 95."),
+    "Ввести вагу": ("weight", "Надішли вагу в кілограмах, наприклад: 95,5 кг."),
+    "Ввести тиск": ("pressure", "Надішли тиск, наприклад: 120/80 або 120/80/70."),
+}
+
 try:
     from zoneinfo import ZoneInfo
     KYIV_TZ = ZoneInfo("Europe/Kyiv")
@@ -69,8 +100,7 @@ def send_telegram(text: str, reply_markup: dict | None = None) -> bool:
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text[:4000]}
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    payload["reply_markup"] = json.dumps(reply_markup or KEYBOARD, ensure_ascii=False)
     data = urllib.parse.urlencode(payload).encode("utf-8")
     try:
         req = urllib.request.Request(url, data=data, method="POST")
@@ -265,6 +295,10 @@ def handle_callback(data: str) -> str | None:
         return analyze_last_workout()
     if data == "menu":
         return ac.MENU_TEXT
+    if data == "confirm_food_delete":
+        return process_food_command("/food_delete")
+    if data == "cancel_food_delete":
+        return "Видалення скасовано."
     return None
 
 
@@ -606,15 +640,20 @@ def handle_update(update: dict, allowed_chat: str) -> bool:
         return False
     photos = message.get("photo") or []
     if photos:
+        stage = "storage"
         try:
+            ast.update_state(bot_input_mode=None)
             if storage.get_pending_food():
-                reply = "Є непідтверджена страва. Надішли /food_confirm або /food_cancel."
+                reply = "Є непідтверджена страва. Натисни «Підтвердити страву» або «Скасувати оцінку»."
             else:
+                stage = "download"
                 photo = nutrition.download_photo(photos[-1]["file_id"])
+                stage = "analysis_or_storage"
                 reply = nutrition.prepare(message.get("caption", ""), photo)
         except Exception as error:
-            logger.warning("Не вдалося обробити фото їжі: %s", type(error).__name__)
-            reply = "⚠️ Не вдалося оцінити фото. Перевір /food перед повторною спробою."
+            logger.warning("Не вдалося обробити фото їжі (%s): %s", stage, type(error).__name__)
+            print(f"Food photo failure: stage={stage}, error={type(error).__name__}", flush=True)
+            reply = "⚠️ Не вдалося оцінити фото; страву не підтверджено. Можна натиснути «Додати їжу» і надіслати текстовий опис."
         send_telegram(reply)
         return True
     if not text:
@@ -623,6 +662,43 @@ def handle_update(update: dict, allowed_chat: str) -> bool:
             return True
         return False
     logger.info("Отримано текстове повідомлення")
+    text = text.strip()
+    try:
+        if text in INPUT_BUTTONS:
+            mode, reply = INPUT_BUTTONS[text]
+            ast.update_state(bot_input_mode=mode)
+            send_telegram(reply)
+            return True
+        if text == "Видалити останній запис":
+            ast.update_state(bot_input_mode=None)
+            send_telegram("Видалити останній підтверджений запис харчування?", {
+                "inline_keyboard": [[
+                    {"text": "Так, видалити", "callback_data": "confirm_food_delete"},
+                    {"text": "Ні", "callback_data": "cancel_food_delete"},
+                ]],
+            })
+            return True
+        mode = ast.read_state().get("bot_input_mode")
+        if text in BUTTON_COMMANDS or text.startswith("/"):
+            if mode:
+                ast.update_state(bot_input_mode=None)
+            text = BUTTON_COMMANDS.get(text, text)
+        elif mode:
+            if mode == "weight" and parse_weight(text) is None:
+                send_telegram("Не вдалося прочитати вагу. Надішли, наприклад, 95,5 кг.")
+                return True
+            if mode == "pressure" and parse_bp(text) is None:
+                send_telegram("Не вдалося прочитати тиск. Надішли, наприклад, 120/80.")
+                return True
+            ast.update_state(bot_input_mode=None)
+            if mode == "food":
+                text = "/food " + text
+            elif mode == "profile":
+                text = "/profile " + text
+    except Exception as error:
+        logger.warning("Не вдалося обробити режим введення: %s", type(error).__name__)
+        send_telegram("⚠️ Тимчасово недоступне сховище. Спробуй пізніше.")
+        return True
     reply = process_text(text)
     if reply:
         send_telegram(reply)

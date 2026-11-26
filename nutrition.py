@@ -85,16 +85,25 @@ def prepare(description: str, photo: bytes | None = None) -> str:
         return "Є непідтверджена страва. Надішли /food_confirm або /food_cancel, перш ніж додавати іншу."
     if not description.strip() and not photo:
         return "Напиши /food і опис страви з приблизною вагою, або надішли фото."
-    analysis = estimate(description, photo)
-    storage.save_pending_food({
-        "id": str(uuid.uuid4()),
-        "eaten_at": datetime.now(KYIV).isoformat(),
-        "source": "photo" if photo else "text",
-        "description": description[:2000] or "Фото страви",
-        "analysis": analysis,
-        "uncertainty": analysis["uncertainty"][:1000],
-    })
-    return format_analysis(analysis) + "\n\nЦе оцінка, не запис. /food_confirm — зберегти; /food_cancel — відхилити. Для виправлення відхили й надішли уточнений опис."
+    try:
+        analysis = estimate(description, photo)
+    except Exception as error:
+        status = getattr(error, "code", None)
+        print(f"Food analysis failure: error={type(error).__name__}, http_status={status if isinstance(status, int) else 'none'}", flush=True)
+        raise
+    try:
+        storage.save_pending_food({
+            "id": str(uuid.uuid4()),
+            "eaten_at": datetime.now(KYIV).isoformat(),
+            "source": "photo" if photo else "text",
+            "description": description[:2000] or "Фото страви",
+            "analysis": analysis,
+            "uncertainty": analysis["uncertainty"][:1000],
+        })
+    except Exception as error:
+        print(f"Food pending save failure: error={type(error).__name__}", flush=True)
+        raise
+    return format_analysis(analysis) + "\n\nЦе оцінка, не запис. Натисни «Підтвердити страву» або «Скасувати оцінку». Для виправлення скасуй оцінку й надішли уточнений опис."
 
 
 def format_analysis(analysis: dict) -> str:
