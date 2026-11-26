@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 KEYBOARD = {
     "keyboard": [
-        [{"text": "Додати їжу"}, {"text": "Їжа за день"}],
+        [{"text": "Додати їжу"}, {"text": "Їжа за день"}, {"text": "Штрихкод"}],
         [{"text": "Підтвердити страву"}, {"text": "Скасувати оцінку"}],
         [{"text": "Видалити останній запис"}, {"text": "Профіль"}],
         [{"text": "Змінити профіль"}, {"text": "Аналіз тренування"}],
@@ -68,6 +68,7 @@ BUTTON_COMMANDS = {
 
 INPUT_BUTTONS = {
     "Додати їжу": ("food", "Надішли фото їжі або її опис і приблизну вагу, наприклад: 150 г курки, 100 г рису."),
+    "Штрихкод": ("barcode", "Надішли чітке фото штрихкоду або його цифри. Номер буде передано до Open Food Facts для пошуку товару."),
     "Змінити профіль": ("profile", "Надішли стать (ч/ж), вік, зріст у см і цільову вагу в кг через пробіл. Наприклад: ч 37 179 95."),
     "Ввести вагу": ("weight", "Надішли вагу в кілограмах, наприклад: 95,5 кг."),
     "Ввести тиск": ("pressure", "Надішли тиск, наприклад: 120/80 або 120/80/70."),
@@ -616,6 +617,29 @@ def process_text(text: str) -> str | None:
             "• агент — AI-режим (звертайся як до AI-асистента)")
 
 
+def process_barcode(code: str, source: str) -> str:
+    if storage.get_pending_food():
+        return "Є непідтверджена страва. Спочатку підтвердь або скасуй її."
+    ast.update_state(bot_input_mode="barcode", barcode_product=None)
+    if not nutrition.valid_barcode(code):
+        return "Не вдалося перевірити штрихкод. Надішли цифри під ним або чітке фото."
+    try:
+        product = nutrition.lookup_barcode(code)
+    except Exception as error:
+        logger.warning("Пошук штрихкоду недоступний: %s", type(error).__name__)
+        ast.update_state(bot_input_mode="food", barcode_product=None)
+        return "База продуктів тимчасово недоступна. Можна надіслати фото таблиці поживності або опис продукту."
+    if not product:
+        ast.update_state(bot_input_mode="food", barcode_product=None)
+        return "У базі немає товару або повних даних БЖВ. Надішли фото таблиці поживності або опис продукту."
+    ast.update_state(bot_input_mode="barcode_weight", barcode_product={**product, "source": source})
+    values = product["per_100g"]
+    brand = f" ({product['brand']})" if product["brand"] else ""
+    return (f"Знайдено: {product['name']}{brand}\n"
+            f"На 100 г: {values['kcal']:g} ккал; Б {values['protein']:g} г / Ж {values['fat']:g} г / В {values['carbs']:g} г.\n"
+            "Джерело: Open Food Facts; звір дані з етикеткою. Скільки грамів ти з'їв?")
+
+
 def handle_update(update: dict, allowed_chat: str) -> bool:
     """Обробляє один update (callback або повідомлення). True якщо була відповідь."""
     # Натискання inline-кнопки
@@ -642,18 +666,33 @@ def handle_update(update: dict, allowed_chat: str) -> bool:
     if photos:
         stage = "storage"
         try:
-            ast.update_state(bot_input_mode=None)
+            state = ast.read_state()
+            mode = state.get("bot_input_mode")
             if storage.get_pending_food():
                 reply = "Є непідтверджена страва. Натисни «Підтвердити страву» або «Скасувати оцінку»."
             else:
                 stage = "download"
                 photo = nutrition.download_photo(photos[-1]["file_id"])
-                stage = "analysis_or_storage"
-                reply = nutrition.prepare(message.get("caption", ""), photo)
+                stage = "barcode"
+                codes = nutrition.read_barcodes(photo)
+                if len(codes) > 1:
+                    reply = "На фото кілька штрихкодів. Надішли цифри потрібного товару після натискання «Штрихкод»."
+                elif codes:
+                    stage = "barcode_lookup"
+                    reply = process_barcode(codes[0], "photo")
+                elif mode == "barcode":
+                    reply = "Штрихкод не зчитано. Надішли чіткіше фото або цифри під ним."
+                else:
+                    ast.update_state(bot_input_mode=None, barcode_product=None)
+                    stage = "analysis_or_storage"
+                    reply = nutrition.prepare(message.get("caption", ""), photo)
         except Exception as error:
             logger.warning("Не вдалося обробити фото їжі (%s): %s", stage, type(error).__name__)
             print(f"Food photo failure: stage={stage}, error={type(error).__name__}", flush=True)
-            reply = "⚠️ Не вдалося оцінити фото; страву не підтверджено. Можна натиснути «Додати їжу» і надіслати текстовий опис."
+            if isinstance(error, TimeoutError):
+                reply = "Сервіс аналізу фото не відповів вчасно; страву не підтверджено. Можна надіслати текстовий опис."
+            else:
+                reply = "Не вдалося обробити фото; страву не підтверджено. Можна натиснути «Додати їжу» і надіслати текстовий опис."
         send_telegram(reply)
         return True
     if not text:
@@ -666,11 +705,14 @@ def handle_update(update: dict, allowed_chat: str) -> bool:
     try:
         if text in INPUT_BUTTONS:
             mode, reply = INPUT_BUTTONS[text]
-            ast.update_state(bot_input_mode=mode)
+            if mode == "barcode" and storage.get_pending_food():
+                send_telegram("Є непідтверджена страва. Спочатку підтвердь або скасуй її.")
+                return True
+            ast.update_state(bot_input_mode=mode, barcode_product=None)
             send_telegram(reply)
             return True
         if text == "Видалити останній запис":
-            ast.update_state(bot_input_mode=None)
+            ast.update_state(bot_input_mode=None, barcode_product=None)
             send_telegram("Видалити останній підтверджений запис харчування?", {
                 "inline_keyboard": [[
                     {"text": "Так, видалити", "callback_data": "confirm_food_delete"},
@@ -678,11 +720,29 @@ def handle_update(update: dict, allowed_chat: str) -> bool:
                 ]],
             })
             return True
-        mode = ast.read_state().get("bot_input_mode")
+        state = ast.read_state()
+        mode = state.get("bot_input_mode")
         if text in BUTTON_COMMANDS or text.startswith("/"):
             if mode:
-                ast.update_state(bot_input_mode=None)
+                ast.update_state(bot_input_mode=None, barcode_product=None)
             text = BUTTON_COMMANDS.get(text, text)
+        elif mode == "barcode":
+            send_telegram(process_barcode(text, "text"))
+            return True
+        elif mode == "barcode_weight":
+            grams = nutrition.barcode_portion(text)
+            product = state.get("barcode_product")
+            if grams is None:
+                send_telegram("Надішли вагу з'їденої порції у грамах, наприклад: 150 г.")
+                return True
+            if not isinstance(product, dict):
+                ast.update_state(bot_input_mode=None, barcode_product=None)
+                send_telegram("Дані товару недоступні. Натисни «Штрихкод» і почни знову.")
+                return True
+            reply = nutrition.prepare_barcode(product, grams, product.get("source", "text"))
+            ast.update_state(bot_input_mode=None, barcode_product=None)
+            send_telegram(reply)
+            return True
         elif mode:
             if mode == "weight" and parse_weight(text) is None:
                 send_telegram("Не вдалося прочитати вагу. Надішли, наприклад, 95,5 кг.")
@@ -690,7 +750,7 @@ def handle_update(update: dict, allowed_chat: str) -> bool:
             if mode == "pressure" and parse_bp(text) is None:
                 send_telegram("Не вдалося прочитати тиск. Надішли, наприклад, 120/80.")
                 return True
-            ast.update_state(bot_input_mode=None)
+            ast.update_state(bot_input_mode=None, barcode_product=None)
             if mode == "food":
                 text = "/food " + text
             elif mode == "profile":

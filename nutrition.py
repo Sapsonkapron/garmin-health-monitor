@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
+import math
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+import zxingcpp
+from PIL import Image
 
 import storage
 
@@ -40,6 +46,90 @@ def download_photo(file_id: str) -> bytes:
     if not photo or len(photo) > MAX_PHOTO_BYTES:
         raise ValueError("Фото порожнє або завелике")
     return photo
+
+
+def valid_barcode(code: str) -> bool:
+    if not re.fullmatch(r"(?:[0-9]{8}|[0-9]{12,14})", code):
+        return False
+    total = sum(int(digit) * (3 if index % 2 == 0 else 1)
+                for index, digit in enumerate(reversed(code[:-1])))
+    return (10 - total % 10) % 10 == int(code[-1])
+
+
+def read_barcodes(photo: bytes) -> list[str]:
+    with Image.open(io.BytesIO(photo)) as image:
+        if image.width * image.height > 25_000_000:
+            raise ValueError("Фото завелике для зчитування")
+        barcodes = zxingcpp.read_barcodes(
+            image.convert("RGB"), formats=(zxingcpp.BarcodeFormat.EAN13 | zxingcpp.BarcodeFormat.EAN8 |
+                                           zxingcpp.BarcodeFormat.UPCA | zxingcpp.BarcodeFormat.ITF14),
+        )
+    return sorted({barcode.text for barcode in barcodes if barcode.valid and valid_barcode(barcode.text)})
+
+
+def lookup_barcode(code: str) -> dict | None:
+    if not valid_barcode(code):
+        raise ValueError("Некоректний штрихкод")
+    fields = "code,product_name,product_name_uk,brands,nutriments"
+    url = f"https://world.openfoodfacts.org/api/v3/product/{code}?" + urllib.parse.urlencode({"fields": fields})
+    request = urllib.request.Request(url, headers={
+        "User-Agent": "GarminHealthMonitor/1.0 (https://github.com/Sapsonkapron/garmin-health-monitor)",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise
+    product = result.get("product")
+    if result.get("status") not in ("success", "success_with_warnings") or not isinstance(product, dict):
+        return None
+    product_code = str(product.get("code", ""))
+    if not valid_barcode(product_code) or product_code.lstrip("0") != code.lstrip("0"):
+        raise ValueError("Код товару не збігається")
+    name = product.get("product_name_uk") or product.get("product_name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    nutrients = product.get("nutriments") or {}
+    fields = {"kcal": "energy-kcal_100g", "protein": "proteins_100g", "fat": "fat_100g", "carbs": "carbohydrates_100g"}
+    values = {}
+    for field, key in fields.items():
+        value = nutrients.get(key)
+        maximum = 900 if field == "kcal" else 100
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= maximum:
+            return None
+        values[field] = value
+    brand = product.get("brands")
+    return {"code": code, "name": name.strip()[:160], "brand": brand.strip()[:80] if isinstance(brand, str) else "", "per_100g": values}
+
+
+def barcode_portion(text: str) -> float | None:
+    match = re.fullmatch(r"\s*(\d{1,5}(?:[.,]\d{1,2})?)\s*(?:г|грам(?:ів|и)?|g)?\s*", text, re.IGNORECASE)
+    if not match:
+        return None
+    grams = float(match.group(1).replace(",", "."))
+    return grams if 0 < grams <= 10000 else None
+
+
+def prepare_barcode(product: dict, grams: float, source: str) -> str:
+    if storage.get_pending_food():
+        return "Є непідтверджена страва. Натисни «Підтвердити страву» або «Скасувати оцінку»."
+    values = product["per_100g"]
+    item = {"name": product["name"], "grams": grams}
+    item.update({field: value * grams / 100 for field, value in values.items()})
+    uncertainty = (f"Дані Open Food Facts для коду {product['code']}; звір назву і БЖВ з етикеткою. "
+                   "Вага порції вказана користувачем; дані бази можуть бути неточними.")
+    analysis = storage._validate_analysis({"items": [item], "uncertainty": uncertainty})
+    storage.save_pending_food({
+        "id": str(uuid.uuid4()),
+        "eaten_at": datetime.now(KYIV).isoformat(),
+        "source": source,
+        "description": f"Штрихкод {product['code']}: {product['name']}",
+        "analysis": analysis,
+        "uncertainty": uncertainty,
+    })
+    return format_analysis(analysis) + "\n\nЦе оцінка, не запис. Натисни «Підтвердити страву» або «Скасувати оцінку»."
 
 
 def estimate(description: str, photo: bytes | None = None) -> dict:

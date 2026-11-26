@@ -1,1 +1,3 @@
 garminconnect
+Pillow>=10,<13
+zxing-cpp>=2.3,<4
