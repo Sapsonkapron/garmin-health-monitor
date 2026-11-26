@@ -12,13 +12,15 @@ import argparse
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from garminconnect import Garmin
 
 import assistant_content as ac
 import assistant_state as ast
+import storage
 
 # --- Конфігурація ---
 DATA_DIR = Path("/tmp/garmin_data")
@@ -56,16 +58,17 @@ def _write_state(state: dict):
         logger.warning(f"Не вдалось зберегти weekly_state.json: {e}")
 
 
+def weekly_notification_kind() -> str:
+    iso = datetime.now(ZoneInfo("Europe/Kyiv")).date().isocalendar()
+    return f"weekly_{iso.year}-w{iso.week:02d}"
+
+
 def already_sent_this_week() -> bool:
-    """Чи вже генерували звіт за поточний тиждень?"""
-    state = _read_state()
-    return state.get("last_week") == get_week_dates(0)[0].isoformat()
+    return not storage.claim_notification(weekly_notification_kind())
 
 
 def mark_sent_this_week():
-    state = _read_state()
-    state["last_week"] = get_week_dates(0)[0].isoformat()
-    _write_state(state)
+    storage.mark_sent_today("weekly")
 
 
 def get_garmin_credentials():
@@ -114,6 +117,8 @@ def collect_week_data(client: Garmin, start: date, end: date) -> dict:
         "body_battery_drained": [],
         "sleep_hours": [],
         "sleep_scores": [],
+        "daily_calories": {},
+        "steps": [],
         "activities": [],
         "vo2max": None,
     }
@@ -179,6 +184,15 @@ def collect_week_data(client: Garmin, start: date, end: date) -> dict:
                 score = daily.get("sleepScores", {}).get("overall", {}).get("value")
                 if score:
                     data["sleep_scores"].append(score)
+        except Exception:
+            pass
+
+        try:
+            stats = client.get_stats(day_str) or {}
+            if stats.get("totalKilocalories") is not None:
+                data["daily_calories"][day_str] = stats["totalKilocalories"]
+            if stats.get("totalSteps") is not None:
+                data["steps"].append(stats["totalSteps"])
         except Exception:
             pass
 
@@ -365,24 +379,30 @@ def get_fresh_health_news() -> dict | None:
     return None
 
 
-def get_plan_execution(activities: list) -> list[str]:
-    """Виконання прогресивного плану тижня."""
-    week = ast.sport_week()
-    plan_info = None
-    for (w_from, w_to), info in ac.PROGRESSIVE_PLAN.items():
-        if w_from <= week <= w_to:
-            plan_info = info
-            break
-    if not plan_info:
-        return []
-    # кількість сесій за тиждень
-    target = 3 if week <= 4 else 4
-    done = len(activities)
-    status = "✅ виконано" if done >= target else f"⚠️ {done}/{target} сесій"
+def get_nutrition_summary(start: date, end: date) -> list[str]:
+    try:
+        entries = storage.get_food_entries(start.isoformat(), end.isoformat())
+    except Exception:
+        return ["🍽 Харчовий щоденник тимчасово недоступний."]
+    if not entries:
+        return ["🍽 Немає підтверджених записів харчування за тиждень; облік неповний."]
+    daily = {}
+    for entry in entries:
+        day = daily.setdefault(entry["local_date"], {"kcal": 0, "protein": 0})
+        for item in entry.get("analysis", {}).get("items", []):
+            day["kcal"] += item.get("kcal", 0)
+            day["protein"] += item.get("protein", 0)
+    days = len(daily)
     return [
-        f"📈 Повернення у форму — тиждень {week}: {status}",
-        f"   План був: {plan_info['plan']}",
+        f"🍽 Записи харчування: {days} днів; середнє за записаними днями: "
+        f"~{sum(day['kcal'] for day in daily.values()) / days:.0f} ккал і "
+        f"~{sum(day['protein'] for day in daily.values()) / days:.0f} г білка.",
+        "   Облік може бути неповним; фактичний дефіцит визначити неможливо без підтвердження всіх прийомів їжі.",
     ]
+
+
+def get_plan_execution(activities: list) -> list[str]:
+    return [f"🏋️ Записано тренувань: {len(activities)}. Виконання плану обговори з тренером."]
 
 
 def propose_challenge():
@@ -390,7 +410,8 @@ def propose_challenge():
     if ast.get_active_challenge() or ast.get_pending_challenge():
         return None
     week_no = date.today().isocalendar()[1]
-    challenge = ac.CHALLENGES[week_no % len(ac.CHALLENGES)]
+    challenges = ac.winter_challenges()
+    challenge = challenges[week_no % len(challenges)]
     ast.set_pending_challenge({
         "id": challenge["id"],
         "title": challenge["title"],
@@ -403,13 +424,8 @@ def generate_report(force: bool = False):
     """Генерує тижневий звіт."""
     logger.info("Початок генерації тижневого звіту")
 
-    # Захист від дублювання в той самий тиждень (для scheduled-резервів;
-    # workflow_dispatch через cron-job.org іде з --force)
-    if not force and already_sent_this_week():
-        logger.info("Звіт за поточний тиждень вже генерувався — пропускаємо")
-        print("Звіт за поточний тиждень вже генерувався")
-        return
-
+    # Позначку створюємо після отримання даних, щоб помилка Garmin
+    # не блокувала наступні спроби доставки.
     client = connect_garmin()
 
     # Поточний та попередній тиждень
@@ -500,15 +516,20 @@ def generate_report(force: bool = False):
     if curr_weights:
         w_avg = safe_avg(curr_weights)
         w_latest = curr_weights[-1]
-        bmi = ast.calc_bmi(w_latest)
-        line = f"⚖️ Вага: {w_latest:.1f} кг (ІМТ {bmi:.1f} — {ast.bmi_category(bmi)})"
+        line = f"⚖️ Вага: {w_latest:.1f} кг"
         if prev_weights:
             w_prev = safe_avg(prev_weights)
             diff = w_avg - w_prev
             line += f" {trend_arrow(w_prev, w_avg)} ({diff:+.1f} кг до сер. попер. тижня)"
-        to_goal = w_latest - ast.TARGET_WEIGHT_KG
-        line += f" | до цілі {ast.TARGET_WEIGHT_KG:.0f} кг: {'-' if to_goal > 0 else '+'}{abs(to_goal):.1f}"
         report_lines.append(line)
+
+    report_lines.extend(get_nutrition_summary(curr_start, curr_end))
+    if curr_data["daily_calories"]:
+        average_burn = safe_avg(list(curr_data["daily_calories"].values()))
+        report_lines.append(f"⌚ Повні витрати Garmin: ~{average_burn:.0f} ккал/день за {len(curr_data['daily_calories'])} днів; це приблизна оцінка.")
+    else:
+        report_lines.append("⌚ Дані про повні добові витрати Garmin недоступні.")
+    report_lines.append("")
 
     # Тренування
     activities = curr_data["activities"]
@@ -517,13 +538,18 @@ def generate_report(force: bool = False):
         total_duration = sum(a["duration_min"] for a in activities)
         report_lines.append(f"   Загальний час: {total_duration:.0f} хв ({total_duration/60:.1f}г)")
 
-        # Групування по типу
-        types = {}
+        types = {"силові": 0, "кардіо": 0, "інші": 0}
         for act in activities:
-            t = act["type"]
-            types[t] = types.get(t, 0) + 1
-        type_str = ", ".join(f"{k}: {v}" for k, v in types.items())
-        report_lines.append(f"   Типи: {type_str}")
+            activity_type = act["type"]
+            if activity_type in {"strength_training", "strength", "strength_training_v2"}:
+                category = "силові"
+            elif activity_type in {"cardio_training", "indoor_cardio", "running", "treadmill_running", "walking", "cycling", "elliptical", "rowing", "indoor_rowing", "swimming", "lap_swimming", "hiit"}:
+                category = "кардіо"
+            else:
+                category = "інші"
+            types[category] += 1
+        type_str = ", ".join(f"{category}: {count}" for category, count in types.items() if count)
+        report_lines.append(f"   Типи за Garmin: {type_str}")
 
         # Детально
         for act in activities:
@@ -611,24 +637,12 @@ def generate_report(force: bool = False):
             f'<a href="{news["link"]}">{escape_html(news["title_uk"])}</a>'
         )
 
-    # Пропозиція челенджу
-    proposal = propose_challenge()
-    if proposal:
-        report_lines.append("")
-        report_lines.append(proposal)
-    else:
-        active = ast.get_active_challenge()
-        if active:
-            report_lines.append("")
-            report_lines.append(f"🏆 Активний челендж: {active.get('challenge', {}).get('title')} — прогрес у ранкових звітах")
-
     # Підказка про кнопки (легенда винесена у кнопку бота)
     report_lines.append("")
     report_lines.append("💡 Кнопки 'Що означають показники' і 'Аналіз тренування' — під ранковим повідомленням")
 
     # Вивід
     report = "\n".join(report_lines)
-    print(report)
 
     # Збереження (у файл — читабельна версія з лінком)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -643,13 +657,18 @@ def generate_report(force: bool = False):
     except Exception as e:
         logger.warning(f"Не вдалось зберегти звіт: {e}")
 
-    mark_sent_this_week()
-
     # Відправка в Telegram (HTML: екрануємо все, крім anchor новини)
     report_html = escape_html(report)
     if news_anchor_html:
         report_html = report_html.replace("%%NEWS_ANCHOR%%", news_anchor_html)
-    send_telegram(report_html)
+    if already_sent_this_week():
+        logger.info("Звіт за поточний тиждень вже генерувався — пропускаємо")
+        print("Звіт за поточний тиждень вже генерувався")
+        return
+    if not send_telegram(report_html):
+        storage.release_notification(weekly_notification_kind())
+        logger.error("Тижневий звіт не доставлено")
+        sys.exit(1)
 
     logger.info("Тижневий звіт згенеровано")
 

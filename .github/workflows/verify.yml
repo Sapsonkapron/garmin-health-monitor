@@ -1,0 +1,55 @@
+name: Verify Integrations
+on:
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Check services without printing personal data
+        env:
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MONITOR_STORE_URL: ${{ secrets.MONITOR_STORE_URL }}
+          MONITOR_STORE_SECRET: ${{ secrets.MONITOR_STORE_SECRET }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from datetime import date
+          from garminconnect import Garmin
+          import nutrition
+          import storage
+
+          garmin = Garmin(os.environ['GARMIN_EMAIL'], os.environ['GARMIN_PASSWORD'])
+          garmin.login()
+          garmin.get_heart_rates(date.today().isoformat())
+          print('Garmin: OK')
+
+          token = os.environ['TELEGRAM_BOT_TOKEN']
+          with urllib.request.urlopen(f'https://api.telegram.org/bot{token}/getMe', timeout=30) as response:
+              result = json.load(response)
+          assert result.get('ok') and result.get('result', {}).get('is_bot')
+          print('Telegram API: OK')
+
+          analysis = nutrition.estimate('100 г вареної курки, 150 г вареної гречки, 100 г огірка')
+          assert analysis['items'] and analysis['uncertainty']
+          print('Gemini food analysis: OK')
+
+          state = storage.db_call('state', {'key': 'assistant'})
+          assert isinstance(state, dict)
+          storage.release_notification('integration_probe')
+          assert storage.claim_notification('integration_probe') is True
+          assert storage.claim_notification('integration_probe') is False
+          storage.release_notification('integration_probe')
+          print('Persistent storage and deduplication: OK')
+          PY

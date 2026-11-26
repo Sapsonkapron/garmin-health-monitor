@@ -18,6 +18,7 @@ from garminconnect import Garmin
 
 import assistant_content as ac
 import assistant_state as ast
+import storage
 
 try:
     from zoneinfo import ZoneInfo
@@ -57,17 +58,11 @@ def _write_state(state: dict):
 
 
 def already_sent_today() -> bool:
-    """Чи вже відправляли щоденний звіт сьогодні?"""
-    state = _read_state()
-    last_sent = state.get("_last_sent_date")
-    return last_sent == date.today().isoformat()
+    return not storage.claim_notification("daily")
 
 
 def mark_sent_today():
-    """Позначає, що щоденний звіт вже відправлено сьогодні."""
-    state = _read_state()
-    state["_last_sent_date"] = date.today().isoformat()
-    _write_state(state)
+    storage.mark_sent_today("daily")
 
 
 def get_garmin_credentials():
@@ -328,16 +323,7 @@ def compute_day_color(metrics: dict, alerts: list) -> str:
 
 
 def get_plan_block() -> list[str]:
-    """Блок прогресивного плану повернення у спорт."""
-    week = ast.sport_week()
-    for (w_from, w_to), info in ac.PROGRESSIVE_PLAN.items():
-        if w_from <= week <= w_to:
-            return [
-                f"📈 Повернення у форму — тиждень {week}:",
-                f"   План: {info['plan']}",
-                f"   Фокус: {info['focus']}",
-            ]
-    return []
+    return ["🏋️ Тренування: дотримуйся плану тренера та враховуй самопочуття й відновлення."]
 
 
 def get_weight_block(weight: dict | None) -> list[str]:
@@ -345,10 +331,7 @@ def get_weight_block(weight: dict | None) -> list[str]:
     if not weight:
         return []
     latest = weight["latest"]
-    bmi = ast.calc_bmi(latest)
-    category = ast.bmi_category(bmi)
-    to_goal = latest - ast.TARGET_WEIGHT_KG
-    lines = [f"⚖️ Вага: {latest} кг (ІМТ {bmi:.1f} — {category}) | до цілі {ast.TARGET_WEIGHT_KG:.0f} кг: {'-' if to_goal > 0 else '+'}{abs(to_goal):.1f} кг"]
+    lines = [f"⚖️ Вага: {latest} кг"]
     if weight.get("week_ago"):
         diff = latest - weight["week_ago"]
         arrow = "↓" if diff < 0 else ("↑" if diff > 0 else "→")
@@ -379,6 +362,10 @@ def get_challenge_progress(client: Garmin) -> list[str]:
     title = ch.get("title", "Челендж")
     if not start:
         return []
+    if ch_id not in ("run_20k", "ride_100k", "walk_10k"):
+        confirmed = challenge.get("confirmed_days", {})
+        days = sum(1 for day in confirmed if start <= day <= date.today().isoformat())
+        return [f"🏆 {title}: {days} самостійних відміток. Підтвердити сьогодні: /done або /done 50."]
     try:
         activities = client.get_activities_by_date(start, date.today().isoformat()) or []
     except Exception as e:
@@ -413,9 +400,7 @@ def get_challenge_progress(client: Garmin) -> list[str]:
             d += timedelta(days=1)
         return [f"🏆 {title}: {days_done}/7 днів"]
     else:
-        # берпі/скакалка: чест-система — дні з відповідною активністю
-        days = {a.get("startTimeLocal", "")[:10] for a in matched if a.get("startTimeLocal")}
-        return [f"🏆 {title}: {len(days)}/7 днів (відмічайся активністю на Garmin)"]
+        return [f"🏆 {title}: виконання вправ потребує твого підтвердження; тип активності Garmin цього не засвідчує."]
 
 
 def ask_gemini_tip(prompt: str) -> str | None:
@@ -424,7 +409,7 @@ def ask_gemini_tip(prompt: str) -> str | None:
     if not api_key:
         return None
     url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-           "gemini-3.6-flash:generateContent?key=" + api_key)
+           "gemini-2.5-flash:generateContent?key=" + api_key)
     payload = {
         "system_instruction": {"parts": [{"text": (
             "Ти дієтолог-асистент. Дай ОДНУ конкретну пораду по харчуванню "
@@ -450,40 +435,28 @@ def ask_gemini_tip(prompt: str) -> str | None:
 
 
 def get_nutrition_block(client: Garmin, metrics: dict) -> list[str]:
-    """Ціль калорій + порада дня (AI з fallback на статичний банк)."""
-    weight_data = get_weight_data(client)
-    weight = weight_data["latest"] if weight_data else 105.0
-    kcal, protein, water = ast.calc_calorie_target(weight)
-    lines = [f"🍽 Харчування: ціль ~{kcal} ккал | білок ~{protein} г | вода ~{water} л"]
-
-    # Порада дня: кеш → AI → статичний банк
-    tip = ast.get_daily_tip()
-    if tip:
-        lines.append(f"💡 {tip}")
-        return lines
-
-    context = [
-        f"Вага: {weight} кг (ціль {ast.TARGET_WEIGHT_KG:.0f} кг), ціль {kcal} ккал/день, "
-        f"білок {protein} г, вода {water} л.",
-        f"Днів без алкоголю: {ast.streak_days()}. Тиждень повернення у спорт: {ast.sport_week()} "
-        f"(тижні 1-2: 3 легкі сесії Z2 20-30 хв).",
+    profile = storage.get_profile()
+    if not profile.get("confirmed_at"):
+        return ["🍽 Для персональних калорій і БЖВ підтвердь профіль командою /profile (формат покаже бот)."]
+    weight = get_weight_data(client)
+    if not weight:
+        return ["🍽 Для розрахунку норми потрібна актуальна вага. Запиши її боту, наприклад: 92,5 кг."]
+    targets = storage.nutrition_targets(
+        weight["latest"], int(profile["age_years"]), int(profile["height_cm"]),
+        float(profile["activity_factor"]), float(profile["target_weight_kg"]), profile["sex"],
+    )
+    lines = [
+        f"🍽 Орієнтир: ~{targets['calories']} ккал; Б {targets['protein']} / Ж {targets['fat']} / В {targets['carbs']} г.",
+        f"   Розрахункові BMR {targets['bmr']} і TDEE {targets['tdee']} ккал — оцінки, не медичні вимірювання. Калорії тренувань повторно не додаємо.",
+        "   Приклад харчування, якщо ці продукти тобі підходять (час і порції підлаштуй під свій режим):",
+        "   • Сніданок: овес, яйця та овочі.",
+        "   • Перекус: йогурт і фрукт.",
+        "   • Обід: м’ясо або риба, крупа та овочі.",
+        "   • Перекус: сир або йогурт.",
+        "   • Вечеря: білковий продукт та овочі.",
+        "   Калорійність і БЖВ кожного прийому залежать від конкретних продуктів та порцій; внеси їх через /food для оцінки.",
     ]
-    if metrics.get("sleep_hours"):
-        context.append(f"Сон вчора: {metrics['sleep_hours']} год.")
-    try:
-        acts = client.get_activities(0, 3) or []
-        for a in acts:
-            tk = a.get("activityType", {}).get("typeKey", "")
-            if tk not in ast.EXCLUDED_ACTIVITY_TYPES:
-                context.append(
-                    f"Вчора/сьогодні тренування: {a.get('activityName')}, "
-                    f"{(a.get('duration') or 0) / 60:.0f} хв.")
-                break
-    except Exception:
-        pass
-    tip = ask_gemini_tip("\n".join(context)) or ac.tip_of_the_day(ac.NUTRITION_FALLBACK_TIPS)
-    ast.set_daily_tip(tip)
-    lines.append(f"💡 {tip}")
+    lines.append("   У день тренування частину вуглеводів розмісти до і після заняття; план тренера не змінюємо.")
     return lines
 
 
@@ -515,21 +488,6 @@ def build_assistant_blocks(client: Garmin, metrics: dict, alerts: list) -> list[
     # Стрік
     lines.extend(get_streak_block())
 
-    # Челендж
-    challenge_lines = get_challenge_progress(client)
-    if challenge_lines:
-        lines.extend(challenge_lines)
-    else:
-        # Щоденна пропозиція нового челенджу, поки користувач не підтвердить.
-        # Ротація за датою — кожен день інший челендж з каталогу.
-        ch = ac.CHALLENGES[date.today().toordinal() % len(ac.CHALLENGES)]
-        ast.set_pending_challenge({
-            "id": ch["id"],
-            "title": ch["title"],
-            "garmin_types": ch["garmin_types"],
-        })
-        lines.append(ch["proposal"])
-
     return lines
 
 
@@ -537,12 +495,8 @@ def check_daily_health(force_telegram: bool = False):
     """Основна функція перевірки здоров'я."""
     logger.info("Початок щоденної перевірки")
 
-    # Захист від повторної відправки в той самий день (для scheduled runs)
-    if not force_telegram and already_sent_today():
-        logger.info("Щоденний звіт вже відправлено сьогодні — пропускаємо")
-        print("Вже відправлено сьогодні")
-        return
-
+    # Позначку створюємо лише після успішного отримання даних,
+    # щоб помилка Garmin не блокувала наступні спроби доставки.
     client = connect_garmin()
     today = date.today().isoformat()
     yesterday = (date.today() - timedelta(days=1)).isoformat()
@@ -785,7 +739,7 @@ def check_daily_health(force_telegram: bool = False):
         bb = metrics.get("body_battery_max", "N/A")
         sleep = metrics.get("sleep_hours", "N/A")
         bp = f"{metrics.get('bp_systolic', 'N/A')}/{metrics.get('bp_diastolic', 'N/A')}"
-        lines.append(f"✅ Всі показники в нормі. RHR: {rhr}, HRV: {hrv}, Stress: {stress}, BB max: {bb}, Сон: {sleep}г, Тиск: {bp}")
+        lines.append(f"ℹ️ За доступними даними попереджень немає; відсутні показники не оцінені. RHR: {rhr}, HRV: {hrv}, Stress: {stress}, BB max: {bb}, Сон: {sleep}г, Тиск: {bp}")
 
     # --- Блоки асистента (завжди) ---
     lines.append("")
@@ -795,11 +749,16 @@ def check_daily_health(force_telegram: bool = False):
         logger.warning(f"Не вдалось побудувати блоки асистента: {e}")
 
     report = "\n".join(lines)
-    print(report)
 
     # --- Відправка в Telegram (завжди — корисний контент щодня) ---
-    send_telegram(report)
-    mark_sent_today()
+    if already_sent_today():
+        logger.info("Щоденний звіт вже відправлено сьогодні — пропускаємо")
+        print("Вже відправлено сьогодні")
+        return
+    if not send_telegram(report):
+        storage.release_notification("daily")
+        logger.error("Щоденний звіт не доставлено")
+        sys.exit(1)
 
     logger.info(f"Перевірка завершена. Алертів: {len(alerts)}")
 

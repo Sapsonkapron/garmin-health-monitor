@@ -15,6 +15,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import assistant_content as ac
+import nutrition
+import storage
 
 STATE_FILE = Path("/tmp/garmin_data/med_state.json")
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -52,13 +54,7 @@ def _write_state(state: dict):
 
 
 def already_sent_today() -> bool:
-    return _read_state().get("evening_med") == datetime.now(KYIV).date().isoformat()
-
-
-def mark_sent_today():
-    state = _read_state()
-    state["evening_med"] = datetime.now(KYIV).date().isoformat()
-    _write_state(state)
+    return not storage.claim_notification("evening_med")
 
 
 def send_telegram(text: str) -> bool:
@@ -81,6 +77,33 @@ def send_telegram(text: str) -> bool:
         return False
 
 
+def evening_summary() -> str:
+    lines = []
+    try:
+        lines.append(nutrition.today_log())
+    except Exception:
+        lines.append("🍽 Підсумок харчування тимчасово недоступний; записи не вигадуємо.")
+    try:
+        from datetime import date
+        from garminconnect import Garmin
+        client = Garmin(os.environ["GARMIN_EMAIL"], os.environ["GARMIN_PASSWORD"])
+        client.login()
+        stats = client.get_stats(date.today().isoformat()) or {}
+        activity = []
+        if stats.get("totalSteps") is not None:
+            activity.append(f"кроки {stats['totalSteps']}")
+        if stats.get("activeKilocalories") is not None:
+            activity.append(f"активні ~{stats['activeKilocalories']} ккал")
+        if stats.get("totalKilocalories") is not None:
+            activity.append(f"повна оцінка витрат ~{stats['totalKilocalories']} ккал")
+        if activity:
+            lines.append("⌚ Garmin: " + "; ".join(activity) + ". Активні калорії вже входять до повних витрат.")
+    except Exception:
+        lines.append("⌚ Активність Garmin сьогодні недоступна.")
+    lines.append("Завтра: план тренера, звичайний білковий прийом їжі після навантаження та сон за режимом.")
+    return "\n".join(lines)
+
+
 def main():
     load_env()
     parser = argparse.ArgumentParser(description="Вечірнє нагадування про ліки")
@@ -88,18 +111,19 @@ def main():
 
     message = (
         "💊 Вечірній прийом ліків — не забудь\n"
-        f"{ac.tip_of_the_day(ac.MED_EVENING_LINES)}"
+        f"{ac.tip_of_the_day(ac.MED_EVENING_LINES)}\n\n"
+        f"{evening_summary()}"
     )
-    print(message)
+    print("Вечірнє повідомлення сформовано; показники в журнал не виводяться")
 
     if already_sent_today():
         print("Вже відправлено сьогодні — пропускаємо")
         return
 
     if send_telegram(message):
-        mark_sent_today()
         print("✅ Відправлено в Telegram")
     else:
+        storage.release_notification("evening_med")
         sys.exit(1)
 
 

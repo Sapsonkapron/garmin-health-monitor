@@ -29,6 +29,8 @@ from pathlib import Path
 
 import assistant_content as ac
 import assistant_state as ast
+import nutrition
+import storage
 
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -133,6 +135,7 @@ def log_weight_to_garmin(weight: float) -> str:
     client = Garmin(os.environ["GARMIN_EMAIL"], os.environ["GARMIN_PASSWORD"])
     client.login()
     client.add_weigh_in(weight=weight, unitKey="kg")
+    storage.add_metrics(weight_kg=weight)
     return f"⚖️ Вага {weight} кг — записано в Garmin ✅"
 
 
@@ -192,7 +195,7 @@ def analyze_last_workout() -> str:
     activities = [a for a in all_activities
                   if a.get("activityType", {}).get("typeKey", "") not in ast.EXCLUDED_ACTIVITY_TYPES]
     if not activities:
-        return "На Garmin поки немає записаних тренувань. Почни з легкої прогулянки або Z2-сесії 20-30 хв 🙂"
+        return "На Garmin поки немає доступних записів тренувань."
 
     act = activities[0]
     name = act.get("activityName", "Тренування")
@@ -204,32 +207,7 @@ def analyze_last_workout() -> str:
     max_hr = act.get("maxHR")
     calories = act.get("calories")
 
-    # Активність у межах челенджу (напр., берпі як HIIT): поради про Z2-темп не застосовні.
-    # Fallback: інтенсивну сесію (берпі/HIIT/силову) розпізнаємо за типом активності
-    # навіть без стану челенджу — кеш GitHub Actions може губити active_challenge.
-    active = ast.get_active_challenge()
-    intensity_types = ("hiit", "crossfit", "strength_training", "indoor_cardio", "cardio_training")
-    name_l = (name or "").lower()
-    cardio_markers = ("вел", "ride", "біг", "run", "прогул", "walk", "gravel")
-    # Типи челенджу доповнюємо з каталогу — стан міг бути записаний до оновлення каталогу
-    ch_types = set()
-    if active:
-        ch_types.update(active.get("challenge", {}).get("garmin_types") or [])
-        for c in ac.CHALLENGES:
-            if c.get("id") == active.get("challenge", {}).get("id"):
-                ch_types.update(c.get("garmin_types") or [])
-    is_challenge_act = (
-        type_key in intensity_types
-        and not any(m in name_l for m in cardio_markers)
-        and (not ch_types or type_key in ch_types)
-    )
-
-    ch = (active or {}).get("challenge", {}) if is_challenge_act else {}
-    if is_challenge_act:
-        ch_title = ch.get("title") or "Челендж-сесія (берпі/інтервали)"
-        lines = [f"🏆 Челендж: {ch_title} — {name} ({start})"]
-    else:
-        lines = [f"🏃 Останнє тренування: {name} ({start})"]
+    lines = [f"🏋️ Останнє тренування: {name} ({start})"]
     parts = [f"⏱ {duration_min:.0f} хв"]
     if distance_km > 0.1:
         parts.append(f"📏 {distance_km:.1f} км")
@@ -241,43 +219,12 @@ def analyze_last_workout() -> str:
         parts.append(f"🔥 {calories:.0f} ккал")
     lines.append(" | ".join(parts))
 
-    if is_challenge_act:
-        # Для челенджу головне — виконання, а не темп/тривалість
-        if avg_hr:
-            lines.append(f"💪 Пульс {avg_hr:.0f} (макс {max_hr:.0f}) — висока інтенсивність, це ОЧІКУВАНО для берпі. Це не Z2-робота, сповільнюватись не треба.")
-        ch_goal = ch.get("goal_desc") or "виконати заплановану кількість повторень"
-        lines.append(f"🎯 Ціль: {ch_goal}. Зараховано! Додатково можна додати спокійну Z2-сесію (вело/прогулянка) для бази — коли є час.")
+    if type_key in ("hiit", "crossfit", "strength_training"):
+        lines.append("💪 Для силових та інтервальних занять середній пульс не визначає якість тренування. Орієнтуйся на план тренера та самопочуття.")
+        lines.append("🍽 Після тренування: звичайний прийом їжі з білком, достатньо рідини та відпочинок.")
         return "\n".join(lines)
 
-    # Пульс vs Z2
-    if avg_hr:
-        if avg_hr > ac.Z2_HIGH:
-            lines.append(
-                f"⚠️ Середній пульс {avg_hr:.0f} — вище Z2 ({ac.Z2_LOW}-{ac.Z2_HIGH}). "
-                "Для бази і VO2max важливіше йти ПОВІЛЬНІШЕ, але довше. Наступного разу сповільнись.")
-        elif avg_hr >= ac.Z2_LOW:
-            lines.append(
-                f"✅ Середній пульс {avg_hr:.0f} — ідеальна Z2 ({ac.Z2_LOW}-{ac.Z2_HIGH}). "
-                "Саме так будується база для VO2max.")
-        else:
-            lines.append(
-                f"ℹ️ Середній пульс {avg_hr:.0f} — нижче Z2 ({ac.Z2_LOW}-{ac.Z2_HIGH}). "
-                "Легке відновлення — ок; для прогресу VO2max тримай 118+ bpm.")
-
-    # Тривалість vs ціль тижня
-    week = ast.sport_week()
-    if week <= 2:
-        target = (20, 30)
-    elif week <= 4:
-        target = (30, 45)
-    else:
-        target = (40, 60)
-    if duration_min < target[0]:
-        lines.append(f"⏱ Тиждень {week}: ціль {target[0]}-{target[1]} хв — цього разу {duration_min:.0f}. Наступного разу додай {target[0] - duration_min:.0f}+ хв.")
-    elif duration_min > target[1] and week <= 4:
-        lines.append(f"⚠️ {duration_min:.0f} хв — більше плану тижня {week} ({target[0]}-{target[1]} хв). Повернення у спорт = поступовість. Не форсуй, щоб не зловити травму або перевтому.")
-    else:
-        lines.append(f"✅ Тривалість у межах плану тижня {week} ({target[0]}-{target[1]} хв).")
+    lines.append("ℹ️ Пульс і тривалість оцінюй відповідно до мети заняття, самопочуття та плану тренера.")
 
     # Порівняння з попередньою активністю того ж типу
     prev_same = next((a for a in activities[1:]
@@ -292,13 +239,7 @@ def analyze_last_workout() -> str:
             elif hr_diff > 3:
                 lines.append(f"ℹ️ Той самий темп, але пульс на {hr_diff:.0f} bpm вище — можлива втома або спека. Слідкуй за відновленням.")
 
-    # Рекомендація на завтра
-    if max_hr and max_hr > 165:
-        lines.append("💤 Завтра: легкий день (прогулянка) — сьогодні був високий пік пульсу.")
-    elif duration_min >= 45:
-        lines.append("💤 Завтра: легке Z2 або відпочинок — сьогодні солідний об'єм.")
-    else:
-        lines.append("💪 Завтра: можна продовжувати за планом тижня.")
+    lines.append("💤 Наступне навантаження узгоджуй із тренером і самопочуттям; за нездужання відпочинь.")
 
     return "\n".join(lines)
 
@@ -446,22 +387,11 @@ def get_ai_context() -> str:
     parts = [
         f"Дата: {date.today().isoformat()}",
         f"Днів без алкоголю: {ast.streak_days()} (користувач кинув пити, підтримуй це)",
-        f"Тиждень повернення у спорт: {ast.sport_week()}. "
-        "План: тижні 1-2 — 3×Z2 20-30 хв; 3-4 — 3-4×Z2 30-45 хв; 5-6 — +легкі інтервали; 7+ — VO2max-інтервали",
-        f"Цілі: вага {ast.TARGET_WEIGHT_KG:.0f} кг (зріст {ast.HEIGHT_CM}), VO2max 44. Z2-пульс: 118-137 bpm",
+        "Основна активність — силові тренування в залі та кардіо з Garmin Connect; не змінюй програму тренера.",
+        "Челенджі вимкнені: не пропонуй їх і не нагадуй про них.",
+        "Мета — поступове зниження ваги; зріст, вік і цільову вагу потрібно підтвердити перед розрахунками.",
         "Приймає профілактичні медикаменти (НЕ називати конкретні препарати). BJJ поки не займається. Риболовля — не тренування.",
     ]
-    try:
-        snap_w = _get_weight_cached()
-        if snap_w:
-            kcal, protein, water = ast.calc_calorie_target(snap_w)
-            parts.append(f"Харчування: ціль ~{kcal} ккал/день, білок ~{protein} г, "
-                         f"вода ~{water} л (дефіцит для схуднення)")
-    except Exception as e:
-        logger.warning(f"Контекст харчування недоступний: {e}")
-    active = ast.get_active_challenge()
-    if active:
-        parts.append(f"Активний челендж: {active.get('challenge', {}).get('title')} (з {active.get('start_date')})")
     try:
         snap = _garmin_snapshot()
         if snap:
@@ -488,7 +418,7 @@ def ask_gemini(text: str) -> str:
         return ("⚠️ AI-режим потребує безкоштовного ключа Gemini.\n"
                 "Отримати: aistudio.google.com/apikey (1 хвилина, безкартково).\n"
                 "Надішли мені ключ у Verdent — я налаштую.")
-    model = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{model}:generateContent?key={api_key}")
     payload = {
@@ -520,8 +450,67 @@ def ask_gemini(text: str) -> str:
         return "⚠️ AI тимчасово недоступний. Спробуй пізніше."
 
 
+def process_food_command(text: str) -> str | None:
+    command, _, description = text.strip().partition(" ")
+    command = command.lower().split("@", 1)[0]
+    if command not in ("/food", "/food_confirm", "/food_cancel", "/food_delete"):
+        return None
+    try:
+        if command == "/food":
+            return nutrition.prepare(description) if description.strip() else nutrition.today_log()
+        if command == "/food_confirm":
+            return "🍽 Страву збережено." if storage.confirm_pending_food() else "Немає страви, що очікує підтвердження."
+        if command == "/food_cancel":
+            if not storage.get_pending_food():
+                return "Немає страви, що очікує підтвердження."
+            storage.discard_pending_food()
+            return "Оцінку скасовано; страву не записано."
+        return "Останній запис харчування видалено." if storage.delete_last_food() else "Записів харчування немає."
+    except Exception as error:
+        logger.warning("Харчовий щоденник недоступний: %s", type(error).__name__)
+        return "⚠️ Не вдалося отримати підтвердження від сервісу. Перевір /food перед повторною спробою."
+
+
+def process_profile_command(text: str) -> str | None:
+    command = text.strip().split(maxsplit=1)[0].lower().split("@", 1)[0] if text.strip() else ""
+    if command != "/profile":
+        return None
+    parts = text.strip().split()
+    try:
+        if len(parts) == 1:
+            profile = storage.get_profile()
+            if not profile.get("confirmed_at"):
+                return "Профіль ще не підтверджено. Формат: /profile ч 37 179 95 — стать (ч/ж), вік, зріст у см, цільова вага у кг. Необов’язково п’ятим числом — коефіцієнт активності 1.2–1.6."
+            sex = "ч" if profile["sex"] == "male" else "ж"
+            return (f"Профіль підтверджено: {sex}, {profile['age_years']} років, {profile['height_cm']} см, "
+                    f"ціль {float(profile['target_weight_kg']):g} кг, активність {float(profile['activity_factor']):g}. "
+                    "Для зміни надішли новий /profile з параметрами.")
+        if len(parts) not in (5, 6) or parts[1].lower() not in ("ч", "ж", "male", "female"):
+            return "Формат: /profile ч 37 179 95 або /profile ж 37 165 60 1.3"
+        sex = "male" if parts[1].lower() in ("ч", "male") else "female"
+        age = int(parts[2])
+        height = int(parts[3])
+        target = float(parts[4].replace(",", "."))
+        activity = float(parts[5].replace(",", ".")) if len(parts) == 6 else 1.3
+        if not 18 <= age <= 120 or not 100 <= height <= 250 or not 35 <= target <= 300 or not 1 <= activity <= 2.5:
+            return "Перевір параметри: вік 18–120, зріст 100–250 см, вага 35–300 кг, активність 1–2.5."
+        storage.update_profile(sex, age, height, target, activity)
+        return "✅ Профіль підтверджено. Наступний ранковий звіт використає його для орієнтовних BMR, TDEE, калорій і БЖВ."
+    except (ValueError, TypeError):
+        return "Не вдалося прочитати параметри. Приклад: /profile ч 37 179 95 1.3"
+    except Exception as error:
+        logger.warning("Профіль недоступний: %s", type(error).__name__)
+        return "⚠️ Не вдалося зберегти профіль. Спробуй ще раз."
+
+
 def process_text(text: str) -> str | None:
     """Обробка одного повідомлення. Повертає відповідь або None (ігнор)."""
+    profile_reply = process_profile_command(text)
+    if profile_reply is not None:
+        return profile_reply
+    food_reply = process_food_command(text)
+    if food_reply is not None:
+        return food_reply
     t = text.strip().lower()
 
     # /-команди (нативне меню Telegram) → мапінг на текстові
@@ -550,9 +539,8 @@ def process_text(text: str) -> str | None:
                 "Команди (вага/тиск/аналіз) працюють як завжди.\n"
                 "Вимкнути: надішли 'агент' ще раз.")
 
-    # Відповіді на челендж — мають пріоритет (короткі слова)
-    if t in ("так", "ні", "стоп"):
-        return handle_challenge_answer(t)
+    if t == "стоп" or re.fullmatch(r"/done(?:\s+\d{1,4})?", t):
+        return "Челенджі вимкнені. Відстежую силові та кардіо з Garmin Connect."
 
     # Текстові дублі кнопок
     if t in ("показники", "легенда"):
@@ -593,8 +581,7 @@ def process_text(text: str) -> str | None:
             "• тиск: 130/80 або 130/80/72\n"
             "• аналіз — розбір останнього тренування\n"
             "• показники — легенда метрик\n"
-            "• агент — AI-режим (звертайся як до AI-асистента)\n"
-            "• так / ні / стоп — відповіді на челендж")
+            "• агент — AI-режим (звертайся як до AI-асистента)")
 
 
 def handle_update(update: dict, allowed_chat: str) -> bool:
@@ -617,16 +604,27 @@ def handle_update(update: dict, allowed_chat: str) -> bool:
     message = update.get("message", {})
     chat_id = str(message.get("chat", {}).get("id", ""))
     text = message.get("text", "")
-    if not text:
-        # Фото/стікер/голосове — відповідаємо підказкою, щоб не мовчати
-        if message and chat_id == allowed_chat:
-            send_telegram("🤔 Я поки розумію лише текст 🙂\n"
-                          "Напиши: аналіз, показники, вагу (106,7) або тиск (130/80)")
-            return True
-        return False
     if chat_id != allowed_chat:
         return False
-    logger.info(f"Отримано: {text}")
+    photos = message.get("photo") or []
+    if photos:
+        try:
+            if storage.get_pending_food():
+                reply = "Є непідтверджена страва. Надішли /food_confirm або /food_cancel."
+            else:
+                photo = nutrition.download_photo(photos[-1]["file_id"])
+                reply = nutrition.prepare(message.get("caption", ""), photo)
+        except Exception as error:
+            logger.warning("Не вдалося обробити фото їжі: %s", type(error).__name__)
+            reply = "⚠️ Не вдалося оцінити фото. Перевір /food перед повторною спробою."
+        send_telegram(reply)
+        return True
+    if not text:
+        if message:
+            send_telegram("🤔 Надішли текст або фото страви з описом.")
+            return True
+        return False
+    logger.info("Отримано текстове повідомлення")
     reply = process_text(text)
     if reply:
         send_telegram(reply)

@@ -5,8 +5,11 @@
 """
 
 import json
+import os
 from pathlib import Path
 from datetime import date
+
+import storage
 
 DATA_DIR = Path("/tmp/garmin_data")
 STATE_FILE = DATA_DIR / "assistant_state.json"
@@ -26,6 +29,11 @@ EXCLUDED_ACTIVITY_TYPES = {"fishing", "fishing_v2"}
 
 
 def read_state() -> dict:
+    if os.environ.get("MONITOR_STORE_URL") or os.environ.get("MONITOR_STORE_SECRET"):
+        state = storage.db_call("state", {"key": "assistant"})
+        if not isinstance(state, dict):
+            raise RuntimeError("Сховище повернуло некоректний стан")
+        return state
     if not STATE_FILE.exists():
         return {}
     try:
@@ -46,8 +54,15 @@ def write_state(state: dict):
 
 def update_state(**kwargs):
     """Оновлює окремі ключі стану."""
+    if os.environ.get("MONITOR_STORE_URL") or os.environ.get("MONITOR_STORE_SECRET"):
+        storage.update_state(**kwargs)
+        return
     state = read_state()
-    state.update(kwargs)
+    for key, value in kwargs.items():
+        if value is None:
+            state.pop(key, None)
+        else:
+            state[key] = value
     write_state(state)
 
 
@@ -86,12 +101,7 @@ def get_pending_challenge() -> dict | None:
 
 
 def set_pending_challenge(challenge: dict | None):
-    state = read_state()
-    if challenge is None:
-        state.pop("pending_challenge", None)
-    else:
-        state["pending_challenge"] = challenge
-    write_state(state)
+    update_state(pending_challenge=challenge)
 
 
 def get_active_challenge() -> dict | None:
@@ -99,12 +109,7 @@ def get_active_challenge() -> dict | None:
 
 
 def set_active_challenge(challenge: dict | None):
-    state = read_state()
-    if challenge is None:
-        state.pop("active_challenge", None)
-    else:
-        state["active_challenge"] = challenge
-    write_state(state)
+    update_state(active_challenge=challenge)
 
 
 # --- Telegram offset ---
@@ -165,5 +170,4 @@ def add_local_bp(systolic: int, diastolic: int, pulse: int, ts: str):
     state = read_state()
     records = state.get("local_bp_records", [])
     records.append({"systolic": systolic, "diastolic": diastolic, "pulse": pulse, "ts": ts})
-    state["local_bp_records"] = records[-30:]  # зберігаємо останні 30
-    write_state(state)
+    update_state(local_bp_records=records[-30:])

@@ -9,6 +9,10 @@ __pycache__/
 .venv/
 *.pyo
 *.egg-info/
-"pass GitHub.py"
-"GitHubToken.py"
+pass GitHub.py
+GitHubToken.py
+CronJobApiKey.py
+oracle.py
+oracle_deploy/
+storage_db.py
 macos/*.plist
