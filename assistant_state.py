@@ -7,7 +7,8 @@
 import json
 import os
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import storage
 
@@ -15,7 +16,7 @@ DATA_DIR = Path("/tmp/garmin_data")
 STATE_FILE = DATA_DIR / "assistant_state.json"
 
 # --- Конфігурація користувача ---
-STREAK_START_DATE = date(2026, 9, 28)     # день 1 без алкоголю (новий стрік після рецидиву 27.09)
+STREAK_START_DATE = date(2026, 11, 15)
 HEIGHT_CM = 179
 TARGET_WEIGHT_KG = 95.0
 SPORT_RETURN_DATE = date(2026, 9, 14)     # день 1 повернення у спорт
@@ -68,7 +69,7 @@ def update_state(**kwargs):
 
 # --- Стрік без алкоголю ---
 def streak_days(today: date = None) -> int:
-    d = today or date.today()
+    d = today or datetime.now(ZoneInfo("Europe/Kyiv")).date()
     return (d - STREAK_START_DATE).days + 1
 
 

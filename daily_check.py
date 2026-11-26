@@ -482,9 +482,6 @@ def build_assistant_blocks(client: Garmin, metrics: dict, alerts: list) -> list[
         logger.warning(f"Не вдалось побудувати блок харчування: {e}")
         lines.append(f"😴 Порада дня: {ac.tip_of_the_day(ac.SLEEP_HEALTH_TIPS)}")
 
-    # Ліки (ранок)
-    lines.append("💊 Ранковий прийом ліків — не забудь")
-
     # Стрік
     lines.extend(get_streak_block())
 

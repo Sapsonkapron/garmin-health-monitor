@@ -1,4 +1,4 @@
-name: Evening Medication Reminder
+name: Evening Health Summary
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Send evening med reminder
+      - name: Send evening health summary
         env:
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}

@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Вечірнє нагадування про прийом ліків (20:00).
-Без назв препаратів — коротке повідомлення + ротаційний рядок мотивації.
-"""
+"""Вечірній підсумок харчування та активності."""
 
 import os
 import sys
@@ -14,7 +11,6 @@ from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import assistant_content as ac
 import nutrition
 import storage
 
@@ -106,14 +102,10 @@ def evening_summary() -> str:
 
 def main():
     load_env()
-    parser = argparse.ArgumentParser(description="Вечірнє нагадування про ліки")
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="Вечірній підсумок здоров'я")
+    parser.parse_args()
 
-    message = (
-        "💊 Вечірній прийом ліків — не забудь\n"
-        f"{ac.tip_of_the_day(ac.MED_EVENING_LINES)}\n\n"
-        f"{evening_summary()}"
-    )
+    message = f"🌙 Вечірній підсумок\n\n{evening_summary()}"
     print("Вечірнє повідомлення сформовано; показники в журнал не виводяться")
 
     if already_sent_today():
