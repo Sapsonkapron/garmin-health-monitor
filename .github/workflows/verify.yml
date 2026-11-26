@@ -24,6 +24,7 @@ jobs:
           python - <<'PY'
           import json
           import os
+          import urllib.error
           import urllib.request
           from datetime import date
           from garminconnect import Garmin
@@ -41,9 +42,23 @@ jobs:
           assert result.get('ok') and result.get('result', {}).get('is_bot')
           print('Telegram API: OK')
 
-          analysis = nutrition.estimate('100 г вареної курки, 150 г вареної гречки, 100 г огірка')
-          assert analysis['items'] and analysis['uncertainty']
-          print('Gemini food analysis: OK')
+          request = urllib.request.Request(
+              'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash',
+              headers={'x-goog-api-key': os.environ['GEMINI_API_KEY']},
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  model = json.load(response)
+              print('Gemini model available:', 'generateContent' in model.get('supportedGenerationMethods', []), flush=True)
+              analysis = nutrition.estimate('100 г вареної курки, 150 г вареної гречки, 100 г огірка')
+              assert analysis['items'] and analysis['uncertainty']
+              print('Gemini food analysis: OK', flush=True)
+          except urllib.error.HTTPError as error:
+              print('Gemini HTTP status:', error.code, flush=True)
+              raise SystemExit(1)
+          except Exception as error:
+              print('Gemini error:', type(error).__name__, flush=True)
+              raise SystemExit(1)
 
           state = storage.db_call('state', {'key': 'assistant'})
           assert isinstance(state, dict)

@@ -18,6 +18,7 @@ from garminconnect import Garmin
 
 import assistant_content as ac
 import assistant_state as ast
+import nutrition
 import storage
 
 try:
@@ -481,6 +482,11 @@ def build_assistant_blocks(client: Garmin, metrics: dict, alerts: list) -> list[
     except Exception as e:
         logger.warning(f"Не вдалось побудувати блок харчування: {e}")
         lines.append(f"😴 Порада дня: {ac.tip_of_the_day(ac.SLEEP_HEALTH_TIPS)}")
+
+    try:
+        lines.append(nutrition.today_log())
+    except Exception:
+        lines.append("🍽 Харчовий облік тимчасово недоступний; дані не вигадуємо.")
 
     # Стрік
     lines.extend(get_streak_block())
