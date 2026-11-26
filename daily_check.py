@@ -409,7 +409,7 @@ def ask_gemini_tip(prompt: str) -> str | None:
     if not api_key:
         return None
     url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-           "gemini-2.5-flash:generateContent?key=" + api_key)
+           "gemini-3.6-flash:generateContent?key=" + api_key)
     payload = {
         "system_instruction": {"parts": [{"text": (
             "Ти дієтолог-асистент. Дай ОДНУ конкретну пораду по харчуванню "

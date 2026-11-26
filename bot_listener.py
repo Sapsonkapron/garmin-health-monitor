@@ -415,10 +415,8 @@ def ask_gemini(text: str) -> str:
     """Запит до Gemini (безкоштовний tier). Повертає текст відповіді."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        return ("⚠️ AI-режим потребує безкоштовного ключа Gemini.\n"
-                "Отримати: aistudio.google.com/apikey (1 хвилина, безкартково).\n"
-                "Надішли мені ключ у Verdent — я налаштую.")
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        return "⚠️ AI-режим тимчасово не налаштований. Не надсилай ключі у чат."
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{model}:generateContent?key={api_key}")
     payload = {

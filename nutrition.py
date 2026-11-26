@@ -46,7 +46,7 @@ def estimate(description: str, photo: bytes | None = None) -> dict:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("ШІ для харчування не налаштований")
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
     if not re.fullmatch(r"[A-Za-z0-9._-]+", model):
         raise ValueError("Некоректна назва моделі")
     instruction = (
